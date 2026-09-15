@@ -252,11 +252,13 @@ static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 
 		if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE)) != 0) {
 			sr_err("Failed to claim interface: %s.", libusb_error_name(ret));
+			sr_usb_close(usb);
 			ret = SR_ERR;
 			break;
 		}
 
-		ret = fnirsi_dla_connect(sdi);
+		if ((ret = fnirsi_dla_connect(sdi)) != SR_OK)
+			sr_usb_close(usb);
 		break;
 	}
 	libusb_free_device_list(devlist, 1);
