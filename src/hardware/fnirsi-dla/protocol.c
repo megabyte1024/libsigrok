@@ -795,6 +795,7 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	int ret;
 	uint64_t msec_samples;
 	int pre_trigger_samples;
+	gboolean any_submitted;
 
 	di = sdi->driver;
 	drvc = di->context;
@@ -842,12 +843,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	}
 
 	if ((ret = send_stop(usb->devhdl)) != SR_OK)
-		return ret;
+		goto err_free_stl;
 	drain_sample_endpoint(usb->devhdl);
 	if ((ret = send_parameter_setting(sdi)) != SR_OK)
-		return ret;
+		goto err_free_stl;
 	if ((ret = send_simple_trigger(sdi, channel_mask(devc))) != SR_OK)
-		return ret;
+		goto err_free_stl;
 
 	/* Worst case expansion is FNIRSI_DLA16_NUM_CHANNELS-fold (num_active
 	 * == 1, the fixed 2-byte-wide wire sample word is emitted in full
@@ -858,25 +859,27 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	devc->outbuf = g_try_malloc(devc->outbuf_size);
 	if (!devc->outbuf) {
 		sr_err("Output buffer malloc failed.");
-		return SR_ERR_MALLOC;
+		ret = SR_ERR_MALLOC;
+		goto err_free_stl;
 	}
 
 	devc->num_transfers = NUM_SIMUL_TRANSFERS;
 	devc->transfers = g_try_malloc0(sizeof(*devc->transfers) * devc->num_transfers);
 	if (!devc->transfers) {
 		sr_err("USB transfers malloc failed.");
-		g_free(devc->outbuf);
-		devc->outbuf = NULL;
-		return SR_ERR_MALLOC;
+		ret = SR_ERR_MALLOC;
+		goto err_free_outbuf;
 	}
 
 	usb_source_add(sdi->session, devc->ctx, USB_TIMEOUT_MS, receive_data, drvc);
 
+	any_submitted = FALSE;
 	for (i = 0; i < devc->num_transfers; i++) {
 		buf = g_try_malloc(devc->transfer_bufsize);
 		if (!buf) {
 			sr_err("USB transfer buffer malloc failed.");
-			return SR_ERR_MALLOC;
+			ret = SR_ERR_MALLOC;
+			break;
 		}
 		transfer = libusb_alloc_transfer(0);
 		libusb_fill_bulk_transfer(transfer, usb->devhdl, EP_SAMPLE_IN,
@@ -886,13 +889,48 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 			sr_err("Failed to submit transfer: %s.", libusb_error_name(ret));
 			libusb_free_transfer(transfer);
 			g_free(buf);
-			fnirsi_dla_abort_acquisition(devc);
-			return SR_ERR;
+			ret = SR_ERR;
+			break;
 		}
 		devc->transfers[i] = transfer;
+		any_submitted = TRUE;
+	}
+
+	if (i < devc->num_transfers) {
+		if (any_submitted) {
+			/*
+			 * At least one transfer is genuinely in flight - let
+			 * its (and any siblings') existing completion-callback
+			 * path (free_transfer() -> finish_acquisition()) drive
+			 * cleanup once cancellation completes, same as any
+			 * other abort. Freeing devc->outbuf/transfers here too
+			 * would race that callback and double-free them.
+			 */
+			fnirsi_dla_abort_acquisition(devc);
+			return ret;
+		}
+		/*
+		 * Nothing was ever submitted - finish_acquisition() will
+		 * never run, so nothing else will free these; do it here.
+		 */
+		usb_source_remove(sdi->session, devc->ctx);
+		g_free(devc->transfers);
+		devc->transfers = NULL;
+		devc->num_transfers = 0;
+		goto err_free_outbuf;
 	}
 
 	std_session_send_df_header(sdi);
 
 	return SR_OK;
+
+err_free_outbuf:
+	g_free(devc->outbuf);
+	devc->outbuf = NULL;
+err_free_stl:
+	if (devc->stl) {
+		soft_trigger_logic_free(devc->stl);
+		devc->stl = NULL;
+	}
+	return ret;
 }
