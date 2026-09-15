@@ -428,13 +428,11 @@ static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 	const char *preset_names[ARRAY_SIZE(threshold_presets)];
 	unsigned int i;
 
-	if (cg) {
-		return SR_ERR_NA;
-	}
-
 	switch (key) {
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
+		if (cg)
+			return SR_ERR_NA;
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
 	case SR_CONF_SAMPLERATE:
 		for (i = 0; i < fnirsi_dla_num_rates; i++)
