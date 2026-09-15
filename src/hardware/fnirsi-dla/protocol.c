@@ -151,6 +151,10 @@ static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
 		sr_err("Bulk OUT failed: %s.", libusb_error_name(ret));
 		return SR_ERR_IO;
 	}
+	if (actual != len) {
+		sr_err("Bulk OUT short write: %d of %d bytes.", actual, len);
+		return SR_ERR_IO;
+	}
 
 	return SR_OK;
 }
