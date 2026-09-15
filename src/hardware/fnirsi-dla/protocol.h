@@ -104,6 +104,14 @@ struct dev_context {
 	 * acquisition start. If both this and limit_samples are set, the
 	 * more restrictive (smaller sample count) of the two wins. */
 	uint64_t limit_msec;
+	/* Effective sample-count bound for the acquisition in progress,
+	 * derived at acquisition start from limit_samples and limit_msec
+	 * (whichever is more restrictive). Deliberately separate from
+	 * limit_samples: deriving it in place would overwrite the user's own
+	 * configured value, so a later acquisition at a different samplerate
+	 * would reuse the previous run's derived bound instead of converting
+	 * limit_msec afresh. */
+	uint64_t acq_limit_samples;
 	uint64_t sent_samples;
 
 	/* Model code self-reported by the device in its GetDeviceData (0x10)

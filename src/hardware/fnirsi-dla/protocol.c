@@ -509,9 +509,9 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 				 * soft_trigger_logic_check() already sent the
 				 * buffered pre-trigger samples to the session
 				 * bus directly (pre_trigger_send()) - just
-				 * account for them here so limit_samples still
-				 * covers the whole capture, pre- and post-
-				 * trigger together.
+				 * account for them here so acq_limit_samples
+				 * still covers the whole capture, pre- and
+				 * post-trigger together.
 				 */
 				devc->sent_samples += (uint64_t)pre_trigger_samples;
 				out += (size_t)trigger_offset * FNIRSI_DLA16_SAMPLE_UNITSIZE;
@@ -524,11 +524,11 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		out_samples = out_len / FNIRSI_DLA16_SAMPLE_UNITSIZE;
 
 		if (out_samples > 0) {
-			if (devc->limit_samples) {
-				if (devc->sent_samples >= devc->limit_samples)
+			if (devc->acq_limit_samples) {
+				if (devc->sent_samples >= devc->acq_limit_samples)
 					out_samples = 0;
-				else if (devc->sent_samples + out_samples > devc->limit_samples)
-					out_samples = devc->limit_samples - devc->sent_samples;
+				else if (devc->sent_samples + out_samples > devc->acq_limit_samples)
+					out_samples = devc->acq_limit_samples - devc->sent_samples;
 			}
 
 			if (out_samples > 0) {
@@ -547,7 +547,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		}
 	}
 
-	if (devc->limit_samples && devc->sent_samples >= devc->limit_samples)
+	if (devc->acq_limit_samples && devc->sent_samples >= devc->acq_limit_samples)
 		devc->limit_reached = TRUE;
 
 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
@@ -819,20 +819,22 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 
 	/* SR_CONF_LIMIT_MSEC is an alternate way to bound the acquisition -
 	 * convert it to a sample count against the current samplerate. If
-	 * both are set, whichever bound is smaller wins. */
+	 * both are set, whichever bound is smaller wins. The result goes to
+	 * acq_limit_samples, never back into limit_samples (see protocol.h). */
+	devc->acq_limit_samples = devc->limit_samples;
 	if (devc->limit_msec) {
 		msec_samples = devc->cur_samplerate * devc->limit_msec / 1000;
-		if (!devc->limit_samples || msec_samples < devc->limit_samples)
-			devc->limit_samples = msec_samples;
+		if (!devc->acq_limit_samples || msec_samples < devc->acq_limit_samples)
+			devc->acq_limit_samples = msec_samples;
 	}
 
 	if ((trigger = sr_session_trigger_get(sdi->session))) {
 		pre_trigger_samples = 0;
 		/* Pre-trigger only makes sense relative to a bounded capture -
-		 * capture_ratio is "% of limit_samples that should come before
-		 * the trigger", so it's meaningless without limit_samples set. */
-		if (devc->limit_samples > 0)
-			pre_trigger_samples = (int)((devc->capture_ratio * devc->limit_samples) / 100);
+		 * capture_ratio is "% of the sample bound that should come
+		 * before the trigger", so it's meaningless without one set. */
+		if (devc->acq_limit_samples > 0)
+			pre_trigger_samples = (int)((devc->capture_ratio * devc->acq_limit_samples) / 100);
 		devc->stl = soft_trigger_logic_new(sdi, trigger, pre_trigger_samples);
 		if (!devc->stl)
 			return SR_ERR_MALLOC;
