@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <limits.h>
 #include "protocol.h"
 
 /* Rate table (see struct fnirsi_dla_rate in protocol.h). Index 0x0F is
@@ -831,6 +832,7 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	unsigned int i;
 	int ret;
 	uint64_t msec_samples;
+	uint64_t pre_trigger_u64;
 	int pre_trigger_samples;
 	gboolean any_submitted;
 
@@ -871,8 +873,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		/* Pre-trigger only makes sense relative to a bounded capture -
 		 * capture_ratio is "% of the sample bound that should come
 		 * before the trigger", so it's meaningless without one set. */
-		if (devc->acq_limit_samples > 0)
-			pre_trigger_samples = (int)((devc->capture_ratio * devc->acq_limit_samples) / 100);
+		if (devc->acq_limit_samples > 0) {
+			pre_trigger_u64 = (devc->capture_ratio * devc->acq_limit_samples) / 100;
+			if (pre_trigger_u64 > INT_MAX / FNIRSI_DLA16_SAMPLE_UNITSIZE)
+				pre_trigger_u64 = INT_MAX / FNIRSI_DLA16_SAMPLE_UNITSIZE;
+			pre_trigger_samples = (int)pre_trigger_u64;
+		}
 		devc->stl = soft_trigger_logic_new(sdi, trigger, pre_trigger_samples);
 		if (!devc->stl)
 			return SR_ERR_MALLOC;
