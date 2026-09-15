@@ -806,6 +806,19 @@ static size_t compute_transfer_bufsize(uint64_t samplerate, unsigned int hw_n)
 	return bufsize;
 }
 
+static void drain_pending_transfers(struct dev_context *devc)
+{
+	struct timeval tv;
+	int i, max_iterations;
+
+	tv.tv_sec = 0;
+	tv.tv_usec = DRAIN_POLL_INTERVAL_MS * 1000;
+
+	max_iterations = DRAIN_MAX_WAIT_MS / DRAIN_POLL_INTERVAL_MS;
+	for (i = 0; i < max_iterations && devc->transfers; i++)
+		libusb_handle_events_timeout(devc->ctx->libusb_ctx, &tv);
+}
+
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct sr_dev_driver *di;
@@ -932,14 +945,17 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	if (i < devc->num_transfers) {
 		if (any_submitted) {
 			/*
-			 * At least one transfer is genuinely in flight - let
-			 * its (and any siblings') existing completion-callback
-			 * path (free_transfer() -> finish_acquisition()) drive
-			 * cleanup once cancellation completes, same as any
-			 * other abort. Freeing devc->outbuf/transfers here too
-			 * would race that callback and double-free them.
+			 * At least one transfer is genuinely in flight - its
+			 * (and any siblings') existing completion-callback path
+			 * (free_transfer() -> finish_acquisition()) is still
+			 * the only thing allowed to free devc->outbuf/transfers
+			 * (freeing them here too would race that callback and
+			 * double-free them), but nothing else is guaranteed to
+			 * ever pump the event loop that drives it - see
+			 * drain_pending_transfers().
 			 */
 			fnirsi_dla_abort_acquisition(sdi);
+			drain_pending_transfers(devc);
 			return ret;
 		}
 		/*

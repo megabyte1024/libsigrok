@@ -73,6 +73,9 @@
 
 #define USB_TIMEOUT_MS		2000
 
+#define DRAIN_POLL_INTERVAL_MS	100
+#define DRAIN_MAX_WAIT_MS	(USB_TIMEOUT_MS * 2)
+
 /* USB 3.0 SuperSpeed bulk endpoint max packet size. */
 #define USB_SS_MAX_PACKET_SIZE	1024
 
