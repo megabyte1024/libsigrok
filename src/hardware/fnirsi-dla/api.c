@@ -84,7 +84,7 @@ static const char *channel_names[MAX_CHANNELS] = {
 	"D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31",
 };
 
-static GSList *scan(struct sr_dev_driver *di, GSList *options)
+static GSList *fnirsi_dla_scan(struct sr_dev_driver *di, GSList *options)
 {
 	struct drv_context *drvc;
 	struct dev_context *devc;
@@ -200,7 +200,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	return std_scan_complete(di, devices);
 }
 
-static int dev_open(struct sr_dev_inst *sdi)
+static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 {
 	struct sr_usb_dev_inst *usb;
 	libusb_device **devlist;
@@ -261,7 +261,7 @@ static int dev_open(struct sr_dev_inst *sdi)
 	return ret;
 }
 
-static int dev_close(struct sr_dev_inst *sdi)
+static int fnirsi_dla_dev_close(struct sr_dev_inst *sdi)
 {
 	struct sr_usb_dev_inst *usb;
 
@@ -276,7 +276,7 @@ static int dev_close(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
-static int config_get(uint32_t key, GVariant **data,
+static int fnirsi_dla_config_get(uint32_t key, GVariant **data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc;
@@ -320,7 +320,7 @@ static int config_get(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
-static int config_set(uint32_t key, GVariant *data,
+static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc;
@@ -394,7 +394,7 @@ static int config_set(uint32_t key, GVariant *data,
 	return SR_OK;
 }
 
-static int config_list(uint32_t key, GVariant **data,
+static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	uint64_t rates[FNIRSI_DLA_MAX_RATES];
@@ -432,7 +432,7 @@ static int config_list(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
-static int dev_acquisition_stop(struct sr_dev_inst *sdi)
+static int fnirsi_dla_dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	fnirsi_dla_abort_acquisition(sdi->priv);
 
@@ -445,16 +445,16 @@ static struct sr_dev_driver fnirsi_dla_driver_info = {
 	.api_version = 1,
 	.init = fnirsi_dla_init,
 	.cleanup = std_cleanup,
-	.scan = scan,
+	.scan = fnirsi_dla_scan,
 	.dev_list = std_dev_list,
 	.dev_clear = std_dev_clear,
-	.config_get = config_get,
-	.config_set = config_set,
-	.config_list = config_list,
-	.dev_open = dev_open,
-	.dev_close = dev_close,
+	.config_get = fnirsi_dla_config_get,
+	.config_set = fnirsi_dla_config_set,
+	.config_list = fnirsi_dla_config_list,
+	.dev_open = fnirsi_dla_dev_open,
+	.dev_close = fnirsi_dla_dev_close,
 	.dev_acquisition_start = fnirsi_dla_start_acquisition,
-	.dev_acquisition_stop = dev_acquisition_stop,
+	.dev_acquisition_stop = fnirsi_dla_dev_acquisition_stop,
 	.context = NULL,
 };
 SR_REGISTER_DEV_DRIVER(fnirsi_dla_driver_info);
