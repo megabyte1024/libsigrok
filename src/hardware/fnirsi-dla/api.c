@@ -330,6 +330,7 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 {
 	struct dev_context *devc;
 	uint64_t rate;
+	uint64_t capture_ratio;
 	double volts;
 	long hundredths;
 	unsigned int i;
@@ -385,12 +386,13 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 		sr_err("Unknown logic threshold preset '%s'.", name);
 		return SR_ERR_ARG;
 	case SR_CONF_CAPTURE_RATIO:
-		devc->capture_ratio = g_variant_get_uint64(data);
-		if (devc->capture_ratio > 100) {
+		capture_ratio = g_variant_get_uint64(data);
+		if (capture_ratio > 100) {
 			sr_err("Capture ratio %" PRIu64 " out of range (0-100).",
-				devc->capture_ratio);
+				capture_ratio);
 			return SR_ERR_ARG;
 		}
+		devc->capture_ratio = capture_ratio;
 		break;
 	default:
 		return SR_ERR_NA;
