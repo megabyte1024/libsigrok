@@ -19,7 +19,6 @@
 
 #include <config.h>
 #include <math.h>
-#include <string.h>
 #include "protocol.h"
 
 #define DEFAULT_SAMPLERATE	SR_MHZ(10)
@@ -354,7 +353,8 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 	double volts;
 	long hundredths;
 	unsigned int i;
-	const char *name;
+	const char *preset_names[ARRAY_SIZE(threshold_presets)];
+	int idx;
 
 	if (!sdi)
 		return SR_ERR_ARG;
@@ -395,16 +395,17 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 		devc->threshold_hundredths = (int16_t)hundredths;
 		break;
 	case SR_CONF_LOGIC_THRESHOLD:
-		name = g_variant_get_string(data, NULL);
-		for (i = 0; i < ARRAY_SIZE(threshold_presets); i++) {
-			if (strcmp(name, threshold_presets[i].name) == 0) {
-				devc->threshold_hundredths =
-					(int16_t)lround(threshold_presets[i].volts * 100.0);
-				return SR_OK;
-			}
+		for (i = 0; i < ARRAY_SIZE(threshold_presets); i++)
+			preset_names[i] = threshold_presets[i].name;
+		idx = std_str_idx(data, preset_names, ARRAY_SIZE(preset_names));
+		if (idx < 0) {
+			sr_err("Unknown logic threshold preset '%s'.",
+				g_variant_get_string(data, NULL));
+			return SR_ERR_ARG;
 		}
-		sr_err("Unknown logic threshold preset '%s'.", name);
-		return SR_ERR_ARG;
+		devc->threshold_hundredths =
+			(int16_t)lround(threshold_presets[idx].volts * 100.0);
+		break;
 	case SR_CONF_CAPTURE_RATIO:
 		capture_ratio = g_variant_get_uint64(data);
 		if (capture_ratio > 100) {
