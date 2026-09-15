@@ -250,8 +250,11 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 static int send_stop(libusb_device_handle *devhdl)
 {
 	uint8_t buf[FRAME_ALIGN];
-	uint8_t payload = 0x00;
-	size_t len = build_framed_command(buf, sizeof(buf), CMD_STOP, &payload, 1);
+	uint8_t payload;
+	size_t len;
+
+	payload = 0x00;
+	len = build_framed_command(buf, sizeof(buf), CMD_STOP, &payload, 1);
 
 	if (len == 0) {
 		sr_err("Internal error building the Stop command.");
@@ -819,9 +822,10 @@ static int configure_channels(const struct sr_dev_inst *sdi)
 
 static uint16_t channel_mask(const struct dev_context *devc)
 {
-	uint16_t mask = 0;
+	uint16_t mask;
 	unsigned int i;
 
+	mask = 0;
 	for (i = 0; i < devc->num_active; i++)
 		mask |= (uint16_t)1 << devc->active_channels[i];
 
