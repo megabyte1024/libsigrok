@@ -425,7 +425,7 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 		const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
-	uint64_t rates[FNIRSI_DLA_MAX_RATES];
+	uint64_t *rates;
 	const char *preset_names[ARRAY_SIZE(threshold_presets)];
 	unsigned int i;
 
@@ -436,9 +436,11 @@ static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 			return SR_ERR_NA;
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
 	case SR_CONF_SAMPLERATE:
+		rates = g_malloc(fnirsi_dla_num_rates * sizeof(rates[0]));
 		for (i = 0; i < fnirsi_dla_num_rates; i++)
 			rates[i] = fnirsi_dla_rates[i].rate_hz;
 		*data = std_gvar_samplerates(rates, fnirsi_dla_num_rates);
+		g_free(rates);
 		break;
 	case SR_CONF_LOGIC_THRESHOLD:
 		for (i = 0; i < ARRAY_SIZE(threshold_presets); i++)

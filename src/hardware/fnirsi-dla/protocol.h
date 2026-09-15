@@ -56,9 +56,6 @@
 /* Scratch buffer size for build_framed()'s unpadded command body. */
 #define MAX_FRAME_BODY		256
 
-/* Array-size cap for the samplerate list in config_list(). */
-#define FNIRSI_DLA_MAX_RATES	16
-
 /* DLA-16's hardware channel count. */
 #define FNIRSI_DLA16_NUM_CHANNELS	16
 
