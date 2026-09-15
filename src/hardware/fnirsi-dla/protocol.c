@@ -491,6 +491,21 @@ static void deinterleave(struct dev_context *devc, const uint8_t *data,
 	*out_len = (size_t)(o - devc->outbuf);
 }
 
+static void send_logic_packet(const struct sr_dev_inst *sdi, uint8_t *data, uint64_t length)
+{
+	const struct sr_datafeed_logic logic = {
+		.length = length,
+		.unitsize = FNIRSI_DLA16_SAMPLE_UNITSIZE,
+		.data = data,
+	};
+	const struct sr_datafeed_packet packet = {
+		.type = SR_DF_LOGIC,
+		.payload = &logic,
+	};
+
+	sr_session_send(sdi, &packet);
+}
+
 static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 {
 	struct sr_dev_inst *sdi;
@@ -577,16 +592,8 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			}
 
 			if (out_samples > 0) {
-				const struct sr_datafeed_logic logic = {
-					.length = out_samples * FNIRSI_DLA16_SAMPLE_UNITSIZE,
-					.unitsize = FNIRSI_DLA16_SAMPLE_UNITSIZE,
-					.data = out,
-				};
-				const struct sr_datafeed_packet packet = {
-					.type = SR_DF_LOGIC,
-					.payload = &logic,
-				};
-				sr_session_send(sdi, &packet);
+				send_logic_packet(sdi, out,
+					out_samples * FNIRSI_DLA16_SAMPLE_UNITSIZE);
 				devc->sent_samples += out_samples;
 			}
 		}
