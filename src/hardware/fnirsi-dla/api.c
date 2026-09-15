@@ -437,7 +437,7 @@ static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 
 static int fnirsi_dla_dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
-	fnirsi_dla_abort_acquisition(sdi->priv);
+	fnirsi_dla_abort_acquisition(sdi);
 
 	return SR_OK;
 }

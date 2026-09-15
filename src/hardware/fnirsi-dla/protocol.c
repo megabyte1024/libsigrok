@@ -490,7 +490,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			transfer->status == LIBUSB_TRANSFER_OVERFLOW) {
 		sr_err("USB transfer failed (%s), aborting acquisition.",
 				libusb_error_name(transfer->status));
-		fnirsi_dla_abort_acquisition(devc);
+		fnirsi_dla_abort_acquisition(sdi);
 		free_transfer(transfer);
 		return;
 	}
@@ -570,7 +570,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		sr_err("Device stopped producing data (%u consecutive empty "
 			"transfers), aborting acquisition.",
 			devc->empty_transfer_count);
-		fnirsi_dla_abort_acquisition(devc);
+		fnirsi_dla_abort_acquisition(sdi);
 	}
 
 	/*
@@ -605,11 +605,18 @@ static int receive_data(int fd, int revents, void *cb_data)
 	return TRUE;
 }
 
-SR_PRIV void fnirsi_dla_abort_acquisition(struct dev_context *devc)
+SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 {
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
 	unsigned int i;
 
+	devc = sdi->priv;
+	usb = sdi->conn;
+
 	devc->acq_aborted = TRUE;
+
+	send_stop(usb->devhdl);
 
 	for (i = 0; i < devc->num_transfers; i++) {
 		if (devc->transfers[i])
@@ -932,7 +939,7 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 			 * other abort. Freeing devc->outbuf/transfers here too
 			 * would race that callback and double-free them.
 			 */
-			fnirsi_dla_abort_acquisition(devc);
+			fnirsi_dla_abort_acquisition(sdi);
 			return ret;
 		}
 		/*
