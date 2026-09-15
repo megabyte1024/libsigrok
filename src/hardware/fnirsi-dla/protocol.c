@@ -779,6 +779,13 @@ static int configure_channels(const struct sr_dev_inst *sdi)
 	for (n = 0; n < devc->num_active; n++) {
 		dst = devc->active_channels[n];
 
+		if (dst >= 8 * FNIRSI_DLA16_SAMPLE_UNITSIZE) {
+			sr_err("Channel index %u has no valid bit position in "
+				"this device's %u-bit-wide wire sample word.",
+				dst, 8 * FNIRSI_DLA16_SAMPLE_UNITSIZE);
+			return SR_ERR_NA;
+		}
+
 		for (v = 0; v < 256; v++) {
 			lo = 0;
 			hi = 0;
