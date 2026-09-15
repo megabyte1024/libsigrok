@@ -40,7 +40,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_LIMIT_MSEC | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_NUM_LOGIC_CHANNELS | SR_CONF_GET,
-	SR_CONF_LOGIC_THRESHOLD | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LOGIC_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_LOGIC_THRESHOLD_CUSTOM | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
@@ -294,6 +294,7 @@ static int fnirsi_dla_config_get(uint32_t key, GVariant **data,
 {
 	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
+	unsigned int i;
 
 	if (!sdi)
 		return SR_ERR_ARG;
@@ -322,6 +323,17 @@ static int fnirsi_dla_config_get(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_LOGIC_THRESHOLD_CUSTOM:
 		*data = g_variant_new_double(devc->threshold_hundredths / 100.0);
+		break;
+	case SR_CONF_LOGIC_THRESHOLD:
+		for (i = 0; i < ARRAY_SIZE(threshold_presets); i++) {
+			if ((int16_t)lround(threshold_presets[i].volts * 100.0)
+					== devc->threshold_hundredths) {
+				*data = g_variant_new_string(threshold_presets[i].name);
+				break;
+			}
+		}
+		if (i == ARRAY_SIZE(threshold_presets))
+			return SR_ERR_NA;
 		break;
 	case SR_CONF_CAPTURE_RATIO:
 		*data = g_variant_new_uint64(devc->capture_ratio);
