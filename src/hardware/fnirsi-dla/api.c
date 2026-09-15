@@ -441,7 +441,7 @@ static int fnirsi_dla_dev_acquisition_stop(struct sr_dev_inst *sdi)
 
 static struct sr_dev_driver fnirsi_dla_driver_info = {
 	.name = "fnirsi-dla",
-	.longname = "FNIRSI DLA-16 Plus",
+	.longname = "FNIRSI DLA",
 	.api_version = 1,
 	.init = fnirsi_dla_init,
 	.cleanup = std_cleanup,
