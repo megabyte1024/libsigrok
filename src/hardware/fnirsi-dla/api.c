@@ -124,6 +124,7 @@ static GSList *fnirsi_dla_scan(struct sr_dev_driver *di, GSList *options)
 	if (device_count < 0) {
 		sr_err("Failed to get device list: %s.",
 				libusb_error_name(device_count));
+		g_slist_free_full(conn_devices, (GDestroyNotify)sr_usb_dev_inst_free);
 		return NULL;
 	}
 
