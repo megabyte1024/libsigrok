@@ -51,42 +51,26 @@ SR_PRIV const unsigned int fnirsi_dla_num_rates = ARRAY_SIZE(fnirsi_dla_rates);
 #define CMD_SIMPLE_TRIGGER	0x12
 
 /* Custom CRC32 variant used to check framed commands: standard reflected
- * CRC-32/IEEE-802.3 table, but the running CRC starts at 0 (not 0xFFFFFFFF)
- * and there is a single final XOR. */
-static uint32_t crc_table[256];
-
-static void build_crc_table(void)
-{
-	unsigned int i, j;
-	uint32_t c;
-
-	for (i = 0; i < 256; i++) {
-		c = i;
-		for (j = 0; j < 8; j++) {
-			if (c & 1)
-				c = (c >> 1) ^ 0xEDB88320u;
-			else
-				c = (c >> 1);
-		}
-		crc_table[i] = c;
-	}
-}
-
-SR_PRIV int fnirsi_dla_init(struct sr_dev_driver *di, struct sr_context *sr_ctx)
-{
-	build_crc_table();
-
-	return std_init(di, sr_ctx);
-}
-
+ * CRC-32/IEEE-802.3 polynomial, but the running CRC starts at 0 (not
+ * 0xFFFFFFFF) and there is a single final XOR. Computed bitwise since only
+ * three framed commands are built per acquisition - not worth a 256-entry
+ * table. */
 static uint32_t gcrc32(const uint8_t *data, size_t len)
 {
 	uint32_t crc;
 	size_t i;
+	unsigned int j;
 
 	crc = 0;
-	for (i = 0; i < len; i++)
-		crc = crc_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+	for (i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (j = 0; j < 8; j++) {
+			if (crc & 1)
+				crc = (crc >> 1) ^ 0xEDB88320u;
+			else
+				crc = crc >> 1;
+		}
+	}
 
 	return crc ^ 0xFFFFFFFFu;
 }

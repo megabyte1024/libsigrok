@@ -189,7 +189,6 @@ struct dev_context {
 SR_PRIV extern const struct fnirsi_dla_rate fnirsi_dla_rates[];
 SR_PRIV extern const unsigned int fnirsi_dla_num_rates;
 
-SR_PRIV int fnirsi_dla_init(struct sr_dev_driver *di, struct sr_context *sr_ctx);
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi);
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi);
