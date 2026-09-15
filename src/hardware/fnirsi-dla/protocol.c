@@ -255,9 +255,10 @@ static void drain_sample_endpoint(libusb_device_handle *devhdl)
 		return;
 	}
 	for (i = 0; i < 64; i++) {
+		actual = 0;
 		ret = libusb_bulk_transfer(devhdl, EP_SAMPLE_IN, buf,
 				TRANSFER_BUFSIZE, &actual, 100);
-		if (ret == LIBUSB_ERROR_TIMEOUT || actual == 0)
+		if (ret != LIBUSB_SUCCESS || actual == 0)
 			break;
 	}
 	g_free(buf);
