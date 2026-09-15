@@ -203,14 +203,16 @@ static GSList *fnirsi_dla_scan(struct sr_dev_driver *di, GSList *options)
 
 static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 {
+	struct drv_context *drvc;
 	struct sr_usb_dev_inst *usb;
 	libusb_device **devlist;
 	struct libusb_device_descriptor des;
 	int device_count, i, ret;
 
+	drvc = sdi->driver->context;
 	usb = sdi->conn;
 
-	device_count = libusb_get_device_list(NULL, &devlist);
+	device_count = libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
 	if (device_count < 0) {
 		sr_err("Failed to get device list: %s.",
 				libusb_error_name(device_count));
