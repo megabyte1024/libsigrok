@@ -101,14 +101,23 @@ static void build_direct_command(uint8_t *buf, uint8_t subcmd,
 		memcpy(buf + 2, payload, payload_len);
 }
 
-static size_t build_framed_command(uint8_t *buf, uint8_t code,
+static size_t build_framed_command(uint8_t *buf, size_t buf_size, uint8_t code,
 		const uint8_t *payload, size_t payload_len)
 {
 	size_t body_len, frame_len, padded_len;
 	uint8_t body[MAX_FRAME_BODY];
 	uint32_t crc;
 
+	if (payload_len > MAX_FRAME_BODY - 2)
+		return 0;
+
 	body_len = payload_len + 2;
+
+	frame_len = 8 + 1 + body_len + 1 + 4;
+	padded_len = (frame_len + FRAME_ALIGN - 1) & ~(size_t)(FRAME_ALIGN - 1);
+	if (padded_len > buf_size)
+		return 0;
+
 	body[0] = code;
 	body[1] = (uint8_t)(payload_len + 1);
 	if (payload && payload_len)
@@ -127,7 +136,6 @@ static size_t build_framed_command(uint8_t *buf, uint8_t code,
 	buf[frame_len++] = (uint8_t)((crc >> 16) & 0xFF);
 	buf[frame_len++] = (uint8_t)((crc >> 24) & 0xFF);
 
-	padded_len = (frame_len + FRAME_ALIGN - 1) & ~(size_t)(FRAME_ALIGN - 1);
 	memset(buf + frame_len, 0, padded_len - frame_len);
 
 	return padded_len;
@@ -239,7 +247,12 @@ static int send_stop(libusb_device_handle *devhdl)
 {
 	uint8_t buf[FRAME_ALIGN];
 	uint8_t payload = 0x00;
-	size_t len = build_framed_command(buf, CMD_STOP, &payload, 1);
+	size_t len = build_framed_command(buf, sizeof(buf), CMD_STOP, &payload, 1);
+
+	if (len == 0) {
+		sr_err("Internal error building the Stop command.");
+		return SR_ERR_BUG;
+	}
 
 	return bulk_out(devhdl, buf, (int)len);
 }
@@ -316,7 +329,12 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 		devc->threshold_hundredths / 100.0, depth,
 		depth == 0 ? "Streaming mode" : "BUG: Buffer mode - must never happen");
 
-	len = build_framed_command(buf, CMD_PARAMETER_SETTING, payload, sizeof(payload));
+	len = build_framed_command(buf, sizeof(buf), CMD_PARAMETER_SETTING,
+			payload, sizeof(payload));
+	if (len == 0) {
+		sr_err("Internal error building the ParameterSetting command.");
+		return SR_ERR_BUG;
+	}
 
 	return bulk_out(usb->devhdl, buf, (int)len);
 }
@@ -334,7 +352,12 @@ static int send_simple_trigger(const struct sr_dev_inst *sdi, uint16_t channel_m
 	payload[2] = (uint8_t)(channel_mask & 0xFF);
 	payload[3] = (uint8_t)((channel_mask >> 8) & 0xFF);
 
-	len = build_framed_command(buf, CMD_SIMPLE_TRIGGER, payload, sizeof(payload));
+	len = build_framed_command(buf, sizeof(buf), CMD_SIMPLE_TRIGGER,
+			payload, sizeof(payload));
+	if (len == 0) {
+		sr_err("Internal error building the SimpleTrigger command.");
+		return SR_ERR_BUG;
+	}
 
 	return bulk_out(usb->devhdl, buf, (int)len);
 }
