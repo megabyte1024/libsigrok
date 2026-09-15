@@ -478,11 +478,27 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		return;
 	}
 
-	if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE) {
+	/*
+	 * None of these resolve themselves by blind resubmission - a
+	 * stalled endpoint in particular just returns STALL again
+	 * immediately, turning resubmission into an unbounded tight loop.
+	 * Treat all of them as a hard, immediate end to the acquisition.
+	 */
+	if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE ||
+			transfer->status == LIBUSB_TRANSFER_STALL ||
+			transfer->status == LIBUSB_TRANSFER_ERROR ||
+			transfer->status == LIBUSB_TRANSFER_OVERFLOW) {
+		sr_err("USB transfer failed (%s), aborting acquisition.",
+				libusb_error_name(transfer->status));
 		fnirsi_dla_abort_acquisition(devc);
 		free_transfer(transfer);
 		return;
 	}
+
+	if (transfer->actual_length > 0)
+		devc->empty_transfer_count = 0;
+	else
+		devc->empty_transfer_count++;
 
 	/* Only deinterleave/send if we haven't already reached the limit in
 	 * an earlier (sibling) transfer's callback - once reached, any data
@@ -550,10 +566,11 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	if (devc->acq_limit_samples && devc->sent_samples >= devc->acq_limit_samples)
 		devc->limit_reached = TRUE;
 
-	if (transfer->status != LIBUSB_TRANSFER_COMPLETED &&
-			transfer->status != LIBUSB_TRANSFER_TIMED_OUT &&
-			transfer->status != LIBUSB_TRANSFER_CANCELLED) {
-		sr_dbg("Transfer status %d, resubmitting anyway.", transfer->status);
+	if (devc->empty_transfer_count > MAX_EMPTY_TRANSFERS) {
+		sr_err("Device stopped producing data (%u consecutive empty "
+			"transfers), aborting acquisition.",
+			devc->empty_transfer_count);
+		fnirsi_dla_abort_acquisition(devc);
 	}
 
 	/*
@@ -815,6 +832,7 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	devc->sent_samples = 0;
 	devc->acq_aborted = FALSE;
 	devc->limit_reached = FALSE;
+	devc->empty_transfer_count = 0;
 	devc->group_fill = 0;
 
 	/* SR_CONF_LIMIT_MSEC is an alternate way to bound the acquisition -

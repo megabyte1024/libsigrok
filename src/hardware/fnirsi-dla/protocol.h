@@ -77,6 +77,7 @@
 #define USB_SS_MAX_PACKET_SIZE	1024
 
 #define NUM_SIMUL_TRANSFERS	4
+#define MAX_EMPTY_TRANSFERS	(NUM_SIMUL_TRANSFERS * 2)
 /* Ceiling for the per-transfer USB buffer size. */
 #define TRANSFER_BUFSIZE	(1024 * 1024)
 /* Floor for the per-transfer USB buffer size. */
@@ -127,6 +128,8 @@ struct dev_context {
 	/* Software trigger support. */
 	struct soft_trigger_logic *stl;
 	gboolean trigger_fired;
+
+	unsigned int empty_transfer_count;
 
 	gboolean acq_aborted;
 	/* Set once limit_samples has been reached: stop resubmitting
