@@ -884,6 +884,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 			break;
 		}
 		transfer = libusb_alloc_transfer(0);
+		if (!transfer) {
+			sr_err("USB transfer allocation failed.");
+			g_free(buf);
+			ret = SR_ERR_MALLOC;
+			break;
+		}
 		libusb_fill_bulk_transfer(transfer, usb->devhdl, EP_SAMPLE_IN,
 				buf, (int)devc->transfer_bufsize, receive_transfer,
 				(void *)sdi, USB_TIMEOUT_MS);
