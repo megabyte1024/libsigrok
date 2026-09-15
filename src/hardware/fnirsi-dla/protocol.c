@@ -842,7 +842,7 @@ static size_t compute_transfer_bufsize(uint64_t samplerate, unsigned int hw_n)
 	return bufsize;
 }
 
-static void drain_pending_transfers(struct dev_context *devc)
+SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc)
 {
 	struct timeval tv;
 	int i, max_iterations;
@@ -996,7 +996,7 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 			 * drain_pending_transfers().
 			 */
 			fnirsi_dla_abort_acquisition(sdi);
-			drain_pending_transfers(devc);
+			fnirsi_dla_drain_pending_transfers(devc);
 			return ret;
 		}
 		/*

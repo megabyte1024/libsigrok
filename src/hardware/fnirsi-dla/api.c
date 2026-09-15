@@ -158,6 +158,7 @@ static GSList *fnirsi_dla_scan(struct sr_dev_driver *di, GSList *options)
 				libusb_get_device_address(devlist[i]), NULL);
 
 		devc = g_malloc0(sizeof(struct dev_context));
+		devc->sdi = sdi;
 		/* FNIRSI_DLA16_VID/PID is the only pair this driver recognizes
 		 * (see the match above), so this is always a 16-channel unit -
 		 * a real second model would need its own VID/PID match (or
@@ -268,11 +269,18 @@ static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 
 static int fnirsi_dla_dev_close(struct sr_dev_inst *sdi)
 {
+	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
 
 	usb = sdi->conn;
 	if (!usb->devhdl)
 		return SR_OK;
+
+	devc = sdi->priv;
+	if (devc->transfers) {
+		fnirsi_dla_abort_acquisition(sdi);
+		fnirsi_dla_drain_pending_transfers(devc);
+	}
 
 	libusb_release_interface(usb->devhdl, USB_INTERFACE);
 	libusb_close(usb->devhdl);
@@ -446,6 +454,19 @@ static int fnirsi_dla_dev_acquisition_stop(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+static void clear_helper(struct dev_context *devc)
+{
+	g_free(devc->outbuf);
+	g_free(devc->transfers);
+	if (devc->stl)
+		soft_trigger_logic_free(devc->stl);
+}
+
+static int fnirsi_dla_dev_clear(const struct sr_dev_driver *di)
+{
+	return std_dev_clear_with_callback(di, (std_dev_clear_callback)clear_helper);
+}
+
 static struct sr_dev_driver fnirsi_dla_driver_info = {
 	.name = "fnirsi-dla",
 	.longname = "FNIRSI DLA",
@@ -454,7 +475,7 @@ static struct sr_dev_driver fnirsi_dla_driver_info = {
 	.cleanup = std_cleanup,
 	.scan = fnirsi_dla_scan,
 	.dev_list = std_dev_list,
-	.dev_clear = std_dev_clear,
+	.dev_clear = fnirsi_dla_dev_clear,
 	.config_get = fnirsi_dla_config_get,
 	.config_set = fnirsi_dla_config_set,
 	.config_list = fnirsi_dla_config_list,

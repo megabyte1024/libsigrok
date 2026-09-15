@@ -94,6 +94,8 @@ struct fnirsi_dla_rate {
 };
 
 struct dev_context {
+	struct sr_dev_inst *sdi;
+
 	uint64_t cur_samplerate;
 	uint8_t cur_rate_idx;
 
@@ -194,5 +196,6 @@ SR_PRIV int fnirsi_dla_init(struct sr_dev_driver *di, struct sr_context *sr_ctx)
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi);
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi);
+SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc);
 
 #endif
