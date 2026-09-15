@@ -106,9 +106,6 @@ struct dev_context {
 	uint64_t limit_msec;
 	uint64_t sent_samples;
 
-	/* Channel names, customizable at scan time via SR_CONF_PROBE_NAMES. */
-	char **channel_names;
-
 	/* Model code self-reported by the device in its GetDeviceData (0x10)
 	 * reply, parsed in fnirsi_dla_connect() - "DL16" on every DLA-16 Plus
 	 * unit tested. Empty until connect() runs. */

@@ -101,6 +101,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	char connection_id[64];
 	unsigned int j;
 	size_t ch_max;
+	char **names;
 
 	drvc = di->context;
 
@@ -178,17 +179,18 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		 * cover falls back to the default "Dn".
 		 */
 		ch_max = devc->num_channels;
-		devc->channel_names = sr_parse_probe_names(probe_names,
+		names = sr_parse_probe_names(probe_names,
 			channel_names, devc->num_channels, devc->num_channels,
 			&ch_max);
 
 		cg = sr_channel_group_new(sdi, "Logic", NULL);
 		for (j = 0; j < devc->num_channels; j++) {
-			const char *name = (j < ch_max) ? devc->channel_names[j] : channel_names[j];
+			const char *name = (j < ch_max) ? names[j] : channel_names[j];
 			struct sr_channel *ch = sr_channel_new(sdi, (int)j,
 					SR_CHANNEL_LOGIC, TRUE, name);
 			cg->channels = g_slist_append(cg->channels, ch);
 		}
+		sr_free_probe_names(names);
 
 		devices = g_slist_append(devices, sdi);
 	}
