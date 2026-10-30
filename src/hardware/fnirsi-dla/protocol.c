@@ -143,26 +143,48 @@ static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
 	return SR_OK;
 }
 
-static int bulk_in_discard(libusb_device_handle *devhdl, int ep, int len,
-		unsigned int timeout_ms)
+/* Sends a direct command without payload and reads its reply. */
+static int direct_command_reply(libusb_device_handle *devhdl, uint8_t subcmd,
+		uint8_t *reply, int *reply_len)
 {
 	uint8_t buf[USB_CMD_SIZE];
-	int actual, ret;
+	int ret;
 
-	if (len > (int)sizeof(buf))
-		len = sizeof(buf);
+	build_direct_command(buf, subcmd, NULL, 0);
+	if ((ret = bulk_out(devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+		return ret;
 
-	ret = libusb_bulk_transfer(devhdl, ep, buf, len, &actual, timeout_ms);
-	/* Timeouts here are expected/harmless (e.g. flush reply already
-	 * consumed, or reply endpoint quiet) - only report hard errors. */
-	if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT)
-		sr_dbg("Bulk IN (discard) on EP 0x%02x: %s.", ep,
-				libusb_error_name(ret));
+	*reply_len = 0;
+	ret = libusb_bulk_transfer(devhdl, EP_CMD_REPLY_IN, reply,
+			USB_CMD_SIZE, reply_len, CMD_REPLY_TIMEOUT_MS);
+	if (ret != LIBUSB_SUCCESS) {
+		sr_err("Reading the reply to command 0x%02x failed: %s.",
+			subcmd, libusb_error_name(ret));
+		return SR_ERR_IO;
+	}
 
 	return SR_OK;
 }
 
-static void parse_device_data_reply(struct sr_dev_inst *sdi,
+static int check_mcu_version_reply(const uint8_t *reply, int len)
+{
+	if (len < 9 || reply[0] != 0x0A || reply[1] != CMD_GET_MCU_VERSION ||
+			reply[2] != 0x01) {
+		sr_err("Malformed GetMCUVersion reply.");
+		return SR_ERR_DATA;
+	}
+	if (reply[3] != 0x61) {
+		sr_err("Device is in bootloader mode, not application mode.");
+		return SR_ERR;
+	}
+
+	sr_info("MCU firmware %u.%u, hardware version %u.",
+		reply[4], reply[5], reply[6]);
+
+	return SR_OK;
+}
+
+static int parse_device_data_reply(struct sr_dev_inst *sdi,
 		const uint8_t *reply, int len)
 {
 	struct dev_context *devc;
@@ -171,13 +193,23 @@ static void parse_device_data_reply(struct sr_dev_inst *sdi,
 	devc = sdi->priv;
 	devc->model_code[0] = '\0';
 
-	if (len < 17)
-		return;
+	if (len < 17 || reply[0] != 0x0A || reply[1] != 0x02 ||
+			reply[2] != 0x0D) {
+		sr_err("Malformed GetDeviceData reply.");
+		return SR_ERR_DATA;
+	}
+	if (reply[6] != 0x01) {
+		sr_err("Device reports its FPGA is not healthy.");
+		return SR_ERR;
+	}
+
+	sr_info("FPGA firmware version %u.", reply[9] * 100u + reply[10]);
+
 	memcpy(code, reply + 13, 4);
 	code[4] = '\0';
 	if (!g_ascii_isprint(code[0]) || !g_ascii_isprint(code[1]) ||
 			!g_ascii_isprint(code[2]) || !g_ascii_isprint(code[3]))
-		return;
+		return SR_OK;
 
 	g_strlcpy(devc->model_code, code, sizeof(devc->model_code));
 	sr_info("Device reports model code \"%s\".", devc->model_code);
@@ -189,6 +221,8 @@ static void parse_device_data_reply(struct sr_dev_inst *sdi,
 		sdi->model = g_strdup_printf(
 			"DLA (unrecognized model code \"%s\" - please report "
 			"this)", devc->model_code);
+
+	return SR_OK;
 }
 
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
@@ -201,26 +235,21 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 
 	usb = sdi->conn;
 
-	build_direct_command(buf, CMD_FLUSH, NULL, 0);
-	if ((ret = bulk_out(usb->devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+	if ((ret = direct_command_reply(usb->devhdl, CMD_FLUSH,
+			reply, &actual)) != SR_OK)
 		return ret;
-	bulk_in_discard(usb->devhdl, EP_CMD_REPLY_IN, USB_CMD_SIZE, 500);
 
-	build_direct_command(buf, CMD_GET_MCU_VERSION, NULL, 0);
-	if ((ret = bulk_out(usb->devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_MCU_VERSION,
+			reply, &actual)) != SR_OK)
 		return ret;
-	bulk_in_discard(usb->devhdl, EP_CMD_REPLY_IN, USB_CMD_SIZE, 500);
+	if ((ret = check_mcu_version_reply(reply, actual)) != SR_OK)
+		return ret;
 
-	build_direct_command(buf, CMD_GET_DEVICE_DATA, NULL, 0);
-	if ((ret = bulk_out(usb->devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_DEVICE_DATA,
+			reply, &actual)) != SR_OK)
 		return ret;
-	ret = libusb_bulk_transfer(usb->devhdl, EP_CMD_REPLY_IN, reply,
-			sizeof(reply), &actual, 500);
-	if (ret == LIBUSB_SUCCESS)
-		parse_device_data_reply(sdi, reply, actual);
-	else if (ret != LIBUSB_ERROR_TIMEOUT)
-		sr_dbg("GetDeviceData reply read failed: %s.",
-				libusb_error_name(ret));
+	if ((ret = parse_device_data_reply(sdi, reply, actual)) != SR_OK)
+		return ret;
 
 	payload = 0x01;
 	build_direct_command(buf, CMD_SET_RESET_STATE, &payload, 1);

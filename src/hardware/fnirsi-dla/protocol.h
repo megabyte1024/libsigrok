@@ -69,6 +69,8 @@
 #define AGGREGATE_SAMPLERATE_MAX	SR_GHZ(2)
 
 #define USB_TIMEOUT_MS		2000
+/* How long a direct command's reply may take. */
+#define CMD_REPLY_TIMEOUT_MS	1000
 
 #define DRAIN_POLL_INTERVAL_MS	100
 #define DRAIN_MAX_WAIT_MS	(USB_TIMEOUT_MS * 2)
