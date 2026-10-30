@@ -263,24 +263,64 @@ SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi)
 	send_stop(usb->devhdl);
 }
 
-static void drain_sample_endpoint(libusb_device_handle *devhdl)
+/*
+ * Reads and throws away sample data left over from an earlier run, until a
+ * read gets nothing. Fails if the device is still sending after
+ * STALE_DRAIN_LIMIT_MS: that data would otherwise start the acquisition.
+ */
+static int drain_sample_endpoint(libusb_device_handle *devhdl)
 {
 	uint8_t *buf;
-	int actual, ret, i;
+	int actual, ret;
+	int64_t start_us, elapsed_ms;
+	uint64_t thrown_away;
 
-	buf = g_try_malloc(TRANSFER_BUFSIZE);
+	buf = g_try_malloc(STALE_READ_BYTES);
 	if (!buf) {
 		sr_err("Drain buffer malloc failed.");
-		return;
+		return SR_ERR_MALLOC;
 	}
-	for (i = 0; i < 64; i++) {
+
+	thrown_away = 0;
+	start_us = g_get_monotonic_time();
+	for (;;) {
 		actual = 0;
 		ret = libusb_bulk_transfer(devhdl, EP_SAMPLE_IN, buf,
-				TRANSFER_BUFSIZE, &actual, 100);
-		if (ret != LIBUSB_SUCCESS || actual == 0)
+				STALE_READ_BYTES, &actual, STALE_READ_TIMEOUT_MS);
+		/* A read that timed out may still have carried data. */
+		if (ret != LIBUSB_SUCCESS && ret != LIBUSB_ERROR_TIMEOUT) {
+			g_free(buf);
+			if (ret == LIBUSB_ERROR_NO_DEVICE) {
+				sr_err("Device disconnected while clearing "
+					"stale sample data.");
+				return SR_ERR_IO;
+			}
+			sr_warn("Clearing stale sample data ended with %s "
+				"after %" PRIu64 " bytes thrown away.",
+				libusb_error_name(ret), thrown_away);
+			return SR_OK;
+		}
+		if (actual == 0)
 			break;
+		thrown_away += (uint64_t)actual;
+
+		elapsed_ms = (g_get_monotonic_time() - start_us) / 1000;
+		if (elapsed_ms >= STALE_DRAIN_LIMIT_MS) {
+			g_free(buf);
+			sr_err("Stale data from an earlier run could not be "
+				"cleared: the device is still sending after "
+				"%" PRId64 " ms, %" PRIu64 " bytes thrown away.",
+				elapsed_ms, thrown_away);
+			return SR_ERR_IO;
+		}
 	}
 	g_free(buf);
+
+	if (thrown_away > 0)
+		sr_dbg("Threw away %" PRIu64 " bytes of stale sample data.",
+			thrown_away);
+
+	return SR_OK;
 }
 
 static int send_parameter_setting(const struct sr_dev_inst *sdi)
@@ -1059,7 +1099,8 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	 * capture's own first bytes. */
 	if ((ret = send_stop(usb->devhdl)) != SR_OK)
 		goto err_free_stl;
-	drain_sample_endpoint(usb->devhdl);
+	if ((ret = drain_sample_endpoint(usb->devhdl)) != SR_OK)
+		goto err_free_stl;
 
 	/* Worst case expansion is FNIRSI_DLA16_NUM_CHANNELS-fold (num_active
 	 * == 1, the fixed 2-byte-wide wire sample word is emitted in full

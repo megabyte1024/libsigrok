@@ -73,6 +73,13 @@
 #define DRAIN_POLL_INTERVAL_MS	100
 #define DRAIN_MAX_WAIT_MS	(USB_TIMEOUT_MS * 2)
 
+/* Clearing stale sample data before an acquisition: read size, how long
+ * one read may wait for data, and how long the device may keep sending
+ * before the acquisition is refused. */
+#define STALE_READ_BYTES	(16 * 1024)
+#define STALE_READ_TIMEOUT_MS	20
+#define STALE_DRAIN_LIMIT_MS	1000
+
 /* USB 3.0 SuperSpeed bulk endpoint max packet size. */
 #define USB_SS_MAX_PACKET_SIZE	1024
 
