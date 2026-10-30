@@ -514,10 +514,28 @@ static void send_logic_packet(const struct sr_dev_inst *sdi, uint8_t *data, uint
 	sr_session_send(sdi, &packet);
 }
 
+static void drop_preroll(struct dev_context *devc, const uint8_t **data,
+		size_t *len)
+{
+	size_t drop;
+
+	if (devc->preroll_bytes_left == 0)
+		return;
+
+	drop = *len;
+	if (drop > devc->preroll_bytes_left)
+		drop = (size_t)devc->preroll_bytes_left;
+	*data += drop;
+	*len -= drop;
+	devc->preroll_bytes_left -= drop;
+}
+
 static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 {
 	struct sr_dev_inst *sdi;
 	struct dev_context *devc;
+	const uint8_t *data;
+	size_t len;
 	uint8_t *out;
 	size_t out_len, out_samples;
 	int pre_trigger_samples, trigger_offset;
@@ -557,9 +575,12 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	 * from transfers that were already in flight at that point (and were
 	 * deliberately allowed to drain naturally rather than being
 	 * cancelled, see below) is simply discarded here. */
-	if (transfer->actual_length > 0 && !devc->limit_reached) {
-		deinterleave(devc, transfer->buffer,
-				(size_t)transfer->actual_length, &out, &out_len);
+	data = transfer->buffer;
+	len = transfer->actual_length > 0 ? (size_t)transfer->actual_length : 0;
+	drop_preroll(devc, &data, &len);
+
+	if (len > 0 && !devc->limit_reached) {
+		deinterleave(devc, data, len, &out, &out_len);
 
 		/*
 		 * Software trigger: the device streams unconditionally
@@ -879,6 +900,16 @@ SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc)
 		libusb_handle_events_timeout(devc->ctx->libusb_ctx, &tv);
 }
 
+static uint64_t preroll_bytes(uint64_t samplerate, unsigned int hw_n)
+{
+	uint64_t samples, groups;
+
+	samples = (PREROLL_MS * samplerate + 999) / 1000;
+	groups = (samples + 7) / 8;
+
+	return groups * hw_n;
+}
+
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct sr_dev_driver *di;
@@ -908,6 +939,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	sr_info("Using %" G_GSIZE_FORMAT " byte USB transfer buffers "
 		"(%u simultaneous) for this acquisition.",
 		devc->transfer_bufsize, NUM_SIMUL_TRANSFERS);
+
+	devc->preroll_bytes_left = preroll_bytes(devc->cur_samplerate,
+			devc->num_active);
+	sr_dbg("Dropping the first %" PRIu64 " bytes (%d ms) of the "
+		"acquisition while the threshold settles.",
+		devc->preroll_bytes_left, PREROLL_MS);
 
 	devc->ctx = drvc->sr_ctx;
 	devc->sent_samples = 0;

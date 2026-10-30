@@ -84,6 +84,10 @@
 #define MIN_TRANSFER_BUFSIZE	(16 * 1024)
 /* Target transfer-buffer size, in milliseconds of aggregate sample data. */
 #define TARGET_TRANSFER_MS	20
+/* Time dropped at the start of every acquisition, so the input threshold
+ * just sent with ParameterSetting has settled. Dropped in whole interleave
+ * groups (8 samples of every wire channel) to keep deinterleave() aligned. */
+#define PREROLL_MS		50
 
 struct fnirsi_dla_rate {
 	uint64_t rate_hz;
@@ -116,6 +120,9 @@ struct dev_context {
 	 * limit_msec afresh. */
 	uint64_t acq_limit_samples;
 	uint64_t sent_samples;
+	/* Wire bytes still to drop at the start of the acquisition, see
+	 * PREROLL_MS. */
+	uint64_t preroll_bytes_left;
 
 	/* Model code self-reported by the device in its GetDeviceData (0x10)
 	 * reply, parsed in fnirsi_dla_connect() - "DL16" on every DLA-16 Plus
