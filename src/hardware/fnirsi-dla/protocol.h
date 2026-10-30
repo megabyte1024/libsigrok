@@ -179,6 +179,9 @@ struct dev_context {
 	 * inside one can't complete, as that thread already holds libusb's
 	 * event lock. */
 	gboolean stop_pending;
+	/* Set when a transfer reported the device unplugged: no Stop or Exit
+	 * is sent to it any more. */
+	gboolean device_gone;
 
 	/* Number of physical logic channels the connected device actually
 	 * has - detected at scan time (see scan() in api.c), always

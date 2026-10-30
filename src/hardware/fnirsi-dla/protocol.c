@@ -235,13 +235,17 @@ static int parse_device_data_reply(struct sr_dev_inst *sdi,
 
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 {
+	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
 	uint8_t buf[FRAME_ALIGN];
 	uint8_t reply[USB_CMD_SIZE];
 	uint8_t payload;
 	int ret, actual;
 
+	devc = sdi->priv;
 	usb = sdi->conn;
+
+	devc->device_gone = FALSE;
 
 	if ((ret = direct_command_reply(usb->devhdl, CMD_FLUSH,
 			reply, &actual)) != SR_OK)
@@ -290,11 +294,16 @@ static int send_stop(libusb_device_handle *devhdl)
  * be capturing from the device then. */
 SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
 {
+	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
 
+	devc = sdi->priv;
 	usb = sdi->conn;
+
+	if (devc->device_gone)
+		return SR_OK;
 
 	len = build_framed_command(buf, sizeof(buf), CMD_EXIT, NULL, 0);
 	if (len == 0) {
@@ -476,7 +485,7 @@ static void finish_acquisition(struct sr_dev_inst *sdi)
 	/* Every transfer is back now: a device that wasn't sent Stop (the
 	 * limit was reached) is still streaming. This runs inside a transfer
 	 * callback, so only mark it - see stop_pending in protocol.h. */
-	if (!devc->stop_sent)
+	if (!devc->stop_sent && !devc->device_gone)
 		devc->stop_pending = TRUE;
 
 	usb_source_remove(sdi->session, devc->ctx);
@@ -707,7 +716,9 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			transfer->status == LIBUSB_TRANSFER_OVERFLOW) {
 		sr_err("USB transfer failed (%s), aborting acquisition.",
 				libusb_error_name(transfer->status));
-		fnirsi_dla_abort_acquisition(sdi);
+		if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE)
+			devc->device_gone = TRUE;
+		abort_acquisition_in_callback(devc);
 		free_transfer(transfer);
 		return;
 	}
@@ -798,7 +809,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		sr_err("Device stopped producing data (%u consecutive empty "
 			"transfers), aborting acquisition.",
 			devc->empty_transfer_count);
-		fnirsi_dla_abort_acquisition(sdi);
+		abort_acquisition_in_callback(devc);
 	}
 
 	/*
@@ -849,7 +860,8 @@ SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 
 	devc->acq_aborted = TRUE;
 
-	send_stop(usb->devhdl);
+	if (!devc->device_gone)
+		send_stop(usb->devhdl);
 	devc->stop_sent = TRUE;
 	devc->stop_pending = FALSE;
 
