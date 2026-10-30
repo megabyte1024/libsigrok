@@ -140,6 +140,15 @@ struct dev_context {
 	 * siblings that hadn't finished receiving their share yet drops
 	 * legitimate data, short by exactly one transfer's worth of samples. */
 	gboolean limit_reached;
+	/* Set once Stop has been sent for the acquisition in progress. */
+	gboolean stop_sent;
+	/* Set when the acquisition ended without Stop (e.g. limit_samples
+	 * reached), so the device is still streaming. Stop is then sent by
+	 * fnirsi_dla_send_pending_stop() from receive_data() or dev_close(),
+	 * never from a transfer callback: a synchronous libusb transfer made
+	 * inside one can't complete, as that thread already holds libusb's
+	 * event lock. */
+	gboolean stop_pending;
 
 	/* Number of physical logic channels the connected device actually
 	 * has - detected at scan time (see scan() in api.c), always
@@ -192,6 +201,7 @@ SR_PRIV extern const unsigned int fnirsi_dla_num_rates;
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi);
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi);
+SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc);
 
 #endif

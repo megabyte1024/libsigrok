@@ -248,6 +248,21 @@ static int send_stop(libusb_device_handle *devhdl)
 	return bulk_out(devhdl, buf, (int)len);
 }
 
+SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
+
+	devc = sdi->priv;
+	usb = sdi->conn;
+
+	if (!devc->stop_pending)
+		return;
+	devc->stop_pending = FALSE;
+	devc->stop_sent = TRUE;
+	send_stop(usb->devhdl);
+}
+
 static void drain_sample_endpoint(libusb_device_handle *devhdl)
 {
 	uint8_t *buf;
@@ -360,6 +375,12 @@ static void finish_acquisition(struct sr_dev_inst *sdi)
 	devc = sdi->priv;
 
 	std_session_send_df_end(sdi);
+
+	/* Every transfer is back now: a device that wasn't sent Stop (the
+	 * limit was reached) is still streaming. This runs inside a transfer
+	 * callback, so only mark it - see stop_pending in protocol.h. */
+	if (!devc->stop_sent)
+		devc->stop_pending = TRUE;
 
 	usb_source_remove(sdi->session, devc->ctx);
 
@@ -615,15 +636,21 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 static int receive_data(int fd, int revents, void *cb_data)
 {
 	struct timeval tv;
+	const struct sr_dev_inst *sdi;
 	struct drv_context *drvc;
 
 	(void)fd;
 	(void)revents;
 
-	drvc = cb_data;
+	sdi = cb_data;
+	drvc = sdi->driver->context;
 
 	tv.tv_sec = tv.tv_usec = 0;
 	libusb_handle_events_timeout(drvc->sr_ctx->libusb_ctx, &tv);
+
+	/* Outside libusb's event handling now, so a synchronous Stop can
+	 * complete. */
+	fnirsi_dla_send_pending_stop(sdi);
 
 	return TRUE;
 }
@@ -640,6 +667,8 @@ SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 	devc->acq_aborted = TRUE;
 
 	send_stop(usb->devhdl);
+	devc->stop_sent = TRUE;
+	devc->stop_pending = FALSE;
 
 	for (i = 0; i < devc->num_transfers; i++) {
 		if (devc->transfers[i])
@@ -884,6 +913,8 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	devc->sent_samples = 0;
 	devc->acq_aborted = FALSE;
 	devc->limit_reached = FALSE;
+	devc->stop_sent = FALSE;
+	devc->stop_pending = FALSE;
 	devc->empty_transfer_count = 0;
 	devc->group_fill = 0;
 
@@ -947,7 +978,8 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		goto err_free_outbuf;
 	}
 
-	usb_source_add(sdi->session, devc->ctx, USB_TIMEOUT_MS, receive_data, drvc);
+	usb_source_add(sdi->session, devc->ctx, USB_TIMEOUT_MS, receive_data,
+			(void *)sdi);
 
 	any_submitted = FALSE;
 	for (i = 0; i < devc->num_transfers; i++) {

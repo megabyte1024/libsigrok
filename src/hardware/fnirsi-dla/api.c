@@ -280,6 +280,7 @@ static int fnirsi_dla_dev_close(struct sr_dev_inst *sdi)
 		fnirsi_dla_abort_acquisition(sdi);
 		fnirsi_dla_drain_pending_transfers(devc);
 	}
+	fnirsi_dla_send_pending_stop(sdi);
 
 	libusb_release_interface(usb->devhdl, USB_INTERFACE);
 	libusb_close(usb->devhdl);
