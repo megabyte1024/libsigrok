@@ -189,6 +189,7 @@ static int parse_device_data_reply(struct sr_dev_inst *sdi,
 {
 	struct dev_context *devc;
 	char code[5];
+	unsigned int i;
 
 	devc = sdi->priv;
 	devc->model_code[0] = '\0';
@@ -207,20 +208,26 @@ static int parse_device_data_reply(struct sr_dev_inst *sdi,
 
 	memcpy(code, reply + 13, 4);
 	code[4] = '\0';
-	if (!g_ascii_isprint(code[0]) || !g_ascii_isprint(code[1]) ||
-			!g_ascii_isprint(code[2]) || !g_ascii_isprint(code[3]))
-		return SR_OK;
+	for (i = 0; code[i]; i++) {
+		if (!g_ascii_isprint(code[i]))
+			code[i] = '?';
+	}
 
 	g_strlcpy(devc->model_code, code, sizeof(devc->model_code));
 	sr_info("Device reports model code \"%s\".", devc->model_code);
 
-	g_free(sdi->model);
-	if (strcmp(devc->model_code, "DL16") == 0)
-		sdi->model = g_strdup("DLA-16 Plus");
-	else
-		sdi->model = g_strdup_printf(
-			"DLA (unrecognized model code \"%s\" - please report "
-			"this)", devc->model_code);
+	/* Other models may share the DLA-16 Plus's USB ID, but nothing in
+	 * this driver was written or verified for them. */
+	if (strcmp(devc->model_code, "DL16") != 0) {
+		if (strcmp(devc->model_code, "DL32") == 0)
+			sr_err("The FNIRSI DLA-32 Plus is not supported yet; "
+				"this driver supports the DLA-16 Plus only.");
+		else
+			sr_err("FNIRSI DLA with model code \"%s\" is not "
+				"supported; this driver supports the DLA-16 "
+				"Plus only.", devc->model_code);
+		return SR_ERR_NA;
+	}
 
 	return SR_OK;
 }
