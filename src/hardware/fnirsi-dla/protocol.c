@@ -514,6 +514,55 @@ static void send_logic_packet(const struct sr_dev_inst *sdi, uint8_t *data, uint
 	sr_session_send(sdi, &packet);
 }
 
+static void cancel_transfers(struct dev_context *devc)
+{
+	unsigned int i;
+
+	for (i = 0; i < devc->num_transfers; i++) {
+		if (devc->transfers[i])
+			libusb_cancel_transfer(devc->transfers[i]);
+	}
+}
+
+/*
+ * Like fnirsi_dla_abort_acquisition(), but for use inside a transfer
+ * callback: Stop isn't sent here, finish_acquisition() leaves it pending
+ * once every transfer is back (see stop_pending in protocol.h).
+ */
+static void abort_acquisition_in_callback(struct dev_context *devc)
+{
+	devc->acq_aborted = TRUE;
+	cancel_transfers(devc);
+}
+
+/*
+ * Counts a transfer's bytes and returns how far delivery has fallen behind
+ * sampling: bytes the device produced since the first transfer arrived,
+ * minus bytes received, relative to the least it has been behind so far.
+ */
+static uint64_t delivery_lag(struct dev_context *devc, size_t bytes)
+{
+	int64_t now_ms, behind;
+	uint64_t produced;
+	gboolean first;
+
+	now_ms = g_get_monotonic_time() / 1000;
+	first = !devc->lag_started;
+	if (first) {
+		devc->lag_started = TRUE;
+		devc->lag_start_ms = now_ms;
+	}
+	devc->received_bytes += bytes;
+
+	produced = (uint64_t)(now_ms - devc->lag_start_ms) *
+		devc->wire_bytes_per_sec / 1000;
+	behind = (int64_t)produced - (int64_t)devc->received_bytes;
+	if (first || behind < devc->least_behind)
+		devc->least_behind = behind;
+
+	return (uint64_t)(behind - devc->least_behind);
+}
+
 static void drop_preroll(struct dev_context *devc, const uint8_t **data,
 		size_t *len)
 {
@@ -536,6 +585,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	struct dev_context *devc;
 	const uint8_t *data;
 	size_t len;
+	uint64_t lag;
 	uint8_t *out;
 	size_t out_len, out_samples;
 	int pre_trigger_samples, trigger_offset;
@@ -569,6 +619,22 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		devc->empty_transfer_count = 0;
 	else
 		devc->empty_transfer_count++;
+
+	/* The transfer that shows the lag isn't delivered: data may already
+	 * be missing before it. */
+	if (transfer->actual_length > 0 && !devc->limit_reached) {
+		lag = delivery_lag(devc, (size_t)transfer->actual_length);
+		if (lag >= LAG_LIMIT_BYTES) {
+			sr_err("Delivery fell %" PRIu64 " MiB (%" PRIu64 " ms) "
+				"behind sampling, the device may drop data - "
+				"aborting acquisition. Lower the samplerate or "
+				"the channel count.", lag / (1024 * 1024),
+				lag * 1000 / devc->wire_bytes_per_sec);
+			abort_acquisition_in_callback(devc);
+			free_transfer(transfer);
+			return;
+		}
+	}
 
 	/* Only deinterleave/send if we haven't already reached the limit in
 	 * an earlier (sibling) transfer's callback - once reached, any data
@@ -680,7 +746,6 @@ SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
-	unsigned int i;
 
 	devc = sdi->priv;
 	usb = sdi->conn;
@@ -691,10 +756,7 @@ SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 	devc->stop_sent = TRUE;
 	devc->stop_pending = FALSE;
 
-	for (i = 0; i < devc->num_transfers; i++) {
-		if (devc->transfers[i])
-			libusb_cancel_transfer(devc->transfers[i]);
-	}
+	cancel_transfers(devc);
 }
 
 static int configure_channels(const struct sr_dev_inst *sdi)
@@ -945,6 +1007,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	sr_dbg("Dropping the first %" PRIu64 " bytes (%d ms) of the "
 		"acquisition while the threshold settles.",
 		devc->preroll_bytes_left, PREROLL_MS);
+
+	devc->wire_bytes_per_sec = devc->cur_samplerate * devc->num_active / 8;
+	devc->received_bytes = 0;
+	devc->lag_started = FALSE;
+	devc->lag_start_ms = 0;
+	devc->least_behind = 0;
 
 	devc->ctx = drvc->sr_ctx;
 	devc->sent_samples = 0;

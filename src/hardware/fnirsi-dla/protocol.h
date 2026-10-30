@@ -76,7 +76,7 @@
 /* USB 3.0 SuperSpeed bulk endpoint max packet size. */
 #define USB_SS_MAX_PACKET_SIZE	1024
 
-#define NUM_SIMUL_TRANSFERS	4
+#define NUM_SIMUL_TRANSFERS	8
 #define MAX_EMPTY_TRANSFERS	(NUM_SIMUL_TRANSFERS * 2)
 /* Ceiling for the per-transfer USB buffer size. */
 #define TRANSFER_BUFSIZE	(1024 * 1024)
@@ -88,6 +88,11 @@
  * just sent with ParameterSetting has settled. Dropped in whole interleave
  * groups (8 samples of every wire channel) to keep deinterleave() aligned. */
 #define PREROLL_MS		50
+/* How far delivery may fall behind sampling before the acquisition is
+ * aborted. The device drops data silently, with nothing in its stream to
+ * show it, once the host falls about 120 MB behind; clean runs were
+ * measured at up to about 47 MB behind. */
+#define LAG_LIMIT_BYTES		(80ULL * 1024 * 1024)
 
 struct fnirsi_dla_rate {
 	uint64_t rate_hz;
@@ -123,6 +128,15 @@ struct dev_context {
 	/* Wire bytes still to drop at the start of the acquisition, see
 	 * PREROLL_MS. */
 	uint64_t preroll_bytes_left;
+
+	/* Delivery lag tracking, see LAG_LIMIT_BYTES: the wire byte rate,
+	 * the bytes received so far, when the first transfer arrived, and
+	 * the least the delivery has been behind sampling since then. */
+	uint64_t wire_bytes_per_sec;
+	uint64_t received_bytes;
+	gboolean lag_started;
+	int64_t lag_start_ms;
+	int64_t least_behind;
 
 	/* Model code self-reported by the device in its GetDeviceData (0x10)
 	 * reply, parsed in fnirsi_dla_connect() - "DL16" on every DLA-16 Plus
