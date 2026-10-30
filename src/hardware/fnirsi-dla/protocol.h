@@ -232,6 +232,7 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi);
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi);
+SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi);
 SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc);
 
 #endif

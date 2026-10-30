@@ -257,8 +257,10 @@ static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 			break;
 		}
 
-		if ((ret = fnirsi_dla_connect(sdi)) != SR_OK)
+		if ((ret = fnirsi_dla_connect(sdi)) != SR_OK) {
+			fnirsi_dla_send_exit(sdi);
 			sr_usb_close(usb);
+		}
 		break;
 	}
 	libusb_free_device_list(devlist, 1);
@@ -281,6 +283,7 @@ static int fnirsi_dla_dev_close(struct sr_dev_inst *sdi)
 		fnirsi_dla_drain_pending_transfers(devc);
 	}
 	fnirsi_dla_send_pending_stop(sdi);
+	fnirsi_dla_send_exit(sdi);
 
 	libusb_release_interface(usb->devhdl, USB_INTERFACE);
 	libusb_close(usb->devhdl);

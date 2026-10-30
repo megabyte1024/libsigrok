@@ -49,6 +49,7 @@ SR_PRIV const unsigned int fnirsi_dla_num_rates = ARRAY_SIZE(fnirsi_dla_rates);
 #define CMD_STOP		0x15
 #define CMD_PARAMETER_SETTING	0x11
 #define CMD_SIMPLE_TRIGGER	0x12
+#define CMD_EXIT		0x18
 
 /* Custom CRC32 variant used to check framed commands: standard reflected
  * CRC-32/IEEE-802.3 polynomial, but the running CRC starts at 0 (not
@@ -282,6 +283,26 @@ static int send_stop(libusb_device_handle *devhdl)
 	}
 
 	return bulk_out(devhdl, buf, (int)len);
+}
+
+/* Sent last before a claimed interface is released, once no acquisition
+ * runs. Not sent when claiming the interface failed: another program may
+ * be capturing from the device then. */
+SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
+{
+	struct sr_usb_dev_inst *usb;
+	uint8_t buf[FRAME_ALIGN];
+	size_t len;
+
+	usb = sdi->conn;
+
+	len = build_framed_command(buf, sizeof(buf), CMD_EXIT, NULL, 0);
+	if (len == 0) {
+		sr_err("Internal error building the Exit command.");
+		return SR_ERR_BUG;
+	}
+
+	return bulk_out(usb->devhdl, buf, (int)len);
 }
 
 SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi)
