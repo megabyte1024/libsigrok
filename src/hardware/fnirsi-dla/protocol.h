@@ -59,7 +59,8 @@
 /* DLA-16's hardware channel count. */
 #define FNIRSI_DLA16_NUM_CHANNELS	16
 
-/* Bytes per sigrok logic sample on the wire. */
+/* Bytes per sigrok logic sample holding all of the DLA-16's channels; see
+ * unitsize in struct dev_context for when 1 byte is used instead. */
 #define FNIRSI_DLA16_SAMPLE_UNITSIZE	2
 
 /* Array-sizing cap for channel-indexed arrays. */
@@ -116,7 +117,8 @@ struct dev_context {
 
 	/* Threshold voltage, hundredths of a volt, signed 16-bit range as
 	 * used on the wire (0x11 payload offsets 11-12). Vendor-declared
-	 * range is +/-5.00V in 0.1V steps. */
+	 * range is +/-5.00V; any 0.01V step is accepted and sent, though
+	 * the vendor software offers 0.1V steps only. */
 	int16_t threshold_hundredths;
 
 	uint64_t limit_samples;
@@ -207,13 +209,19 @@ struct dev_context {
 	uint8_t group_buf[MAX_CHANNELS];
 	unsigned int group_fill;
 
+	/* Bytes per SR_DF_LOGIC sample for the acquisition in progress:
+	 * 1 when every wire channel is D0-D7 and no software trigger is set,
+	 * else FNIRSI_DLA16_SAMPLE_UNITSIZE. */
+	unsigned int unitsize;
+
 	/* Per-physical-channel bit-transpose lookup tables used by the fast
-	 * path in deinterleave() (protocol.c). */
+	 * path in deinterleave() (protocol.c). With 1-byte samples only
+	 * chan_lut_lo is used. */
 	uint64_t chan_lut_lo[MAX_CHANNELS][256];
 	uint64_t chan_lut_hi[MAX_CHANNELS][256];
 
 	/* Scratch buffer for deinterleaved SR_DF_LOGIC output, sized for the
-	 * worst case (num_active == 1, 16x expansion). */
+	 * worst case (num_active == 1, 8 * unitsize expansion). */
 	uint8_t *outbuf;
 	size_t outbuf_size;
 

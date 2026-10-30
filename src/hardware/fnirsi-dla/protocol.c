@@ -412,7 +412,8 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 	memset(payload, 0, sizeof(payload));
 	/* Offsets 0-3: NOT safe to touch (hangs / non-reproducible behaviour) -
 	 * always left at 0. */
-	/* Offset 4: no effect across its full 0-255 range - 0 is fine. */
+	/* Offset 4: no effect seen across its full 0-255 range - sent as 1. */
+	payload[4] = 0x01;
 	/* Offsets 6-9: sample rate in Hz, u32 LE. */
 	payload[6] = (uint8_t)(devc->cur_samplerate & 0xFF);
 	payload[7] = (uint8_t)((devc->cur_samplerate >> 8) & 0xFF);
@@ -543,6 +544,20 @@ static void resubmit_transfer(struct libusb_transfer *transfer)
 
 /* Deinterleaves the device's channel-round-robin wire format into standard
  * sigrok SR_DF_LOGIC packets. */
+/* Explicit little-endian byte stores (not a raw struct/memcpy write of the
+ * uint64_t) so output byte order is correct regardless of host endianness. */
+static inline void store_le64(uint8_t *o, uint64_t v)
+{
+	o[0] = (uint8_t)(v);
+	o[1] = (uint8_t)(v >> 8);
+	o[2] = (uint8_t)(v >> 16);
+	o[3] = (uint8_t)(v >> 24);
+	o[4] = (uint8_t)(v >> 32);
+	o[5] = (uint8_t)(v >> 40);
+	o[6] = (uint8_t)(v >> 48);
+	o[7] = (uint8_t)(v >> 56);
+}
+
 static void deinterleave(struct dev_context *devc, const uint8_t *data,
 		size_t len, uint8_t **out, size_t *out_len)
 {
@@ -550,7 +565,6 @@ static void deinterleave(struct dev_context *devc, const uint8_t *data,
 	unsigned int c;
 	uint8_t *o;
 	uint64_t lo, hi;
-	uint8_t v;
 
 	o = devc->outbuf;
 
@@ -561,44 +575,31 @@ static void deinterleave(struct dev_context *devc, const uint8_t *data,
 		devc->group_fill = 0;
 
 		/*
-		 * One complete interleave group -> 8 time-samples, each a
-		 * 16-bit-wide (2 byte) sigrok logic sample - the DLA-16's
-		 * actual wire sample format (one bit per
-		 * FNIRSI_DLA16_NUM_CHANNELS possible channel, protocol.h).
-		 * Built via the per-channel lookup tables (chan_lut_lo/hi,
-		 * protocol.h) instead of a branchy per-bit test loop: lo
-		 * packs times 0-3 into 16-bit lanes of one 64-bit word, hi
-		 * packs times 4-7 the same way, and each active channel
-		 * contributes with a single branch-free OR into each half.
-		 * This is required to sustain 16ch/250MHz in real time.
+		 * One complete interleave group -> 8 time-samples of
+		 * devc->unitsize bytes each. Built via the per-channel lookup
+		 * tables (chan_lut_lo/hi, protocol.h) instead of a branchy
+		 * per-bit test loop, each active channel contributing with a
+		 * single branch-free OR. With 1-byte samples, lo holds all 8
+		 * times in 8-bit lanes. With 2-byte samples, lo packs times
+		 * 0-3 into 16-bit lanes and hi times 4-7. This is required to
+		 * sustain 16ch/250MHz in real time.
 		 */
 		lo = 0;
-		hi = 0;
-		for (c = 0; c < devc->num_active; c++) {
-			v = devc->group_buf[c];
-			lo |= devc->chan_lut_lo[c][v];
-			hi |= devc->chan_lut_hi[c][v];
+		if (devc->unitsize == 1) {
+			for (c = 0; c < devc->num_active; c++)
+				lo |= devc->chan_lut_lo[c][devc->group_buf[c]];
+			store_le64(o, lo);
+			o += 8;
+		} else {
+			hi = 0;
+			for (c = 0; c < devc->num_active; c++) {
+				lo |= devc->chan_lut_lo[c][devc->group_buf[c]];
+				hi |= devc->chan_lut_hi[c][devc->group_buf[c]];
+			}
+			store_le64(o, lo);
+			store_le64(o + 8, hi);
+			o += 16;
 		}
-		/* Explicit little-endian byte stores (not a raw struct/memcpy
-		 * write of the uint64_t) so output byte order is correct
-		 * regardless of host endianness. */
-		o[0]  = (uint8_t)(lo);
-		o[1]  = (uint8_t)(lo >> 8);
-		o[2]  = (uint8_t)(lo >> 16);
-		o[3]  = (uint8_t)(lo >> 24);
-		o[4]  = (uint8_t)(lo >> 32);
-		o[5]  = (uint8_t)(lo >> 40);
-		o[6]  = (uint8_t)(lo >> 48);
-		o[7]  = (uint8_t)(lo >> 56);
-		o[8]  = (uint8_t)(hi);
-		o[9]  = (uint8_t)(hi >> 8);
-		o[10] = (uint8_t)(hi >> 16);
-		o[11] = (uint8_t)(hi >> 24);
-		o[12] = (uint8_t)(hi >> 32);
-		o[13] = (uint8_t)(hi >> 40);
-		o[14] = (uint8_t)(hi >> 48);
-		o[15] = (uint8_t)(hi >> 56);
-		o += 16;
 	}
 
 	*out = devc->outbuf;
@@ -607,9 +608,10 @@ static void deinterleave(struct dev_context *devc, const uint8_t *data,
 
 static void send_logic_packet(const struct sr_dev_inst *sdi, uint8_t *data, uint64_t length)
 {
+	const struct dev_context *devc = sdi->priv;
 	const struct sr_datafeed_logic logic = {
 		.length = length,
-		.unitsize = FNIRSI_DLA16_SAMPLE_UNITSIZE,
+		.unitsize = devc->unitsize,
 		.data = data,
 	};
 	const struct sr_datafeed_packet packet = {
@@ -777,14 +779,14 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 				 * post-trigger together.
 				 */
 				devc->sent_samples += (uint64_t)pre_trigger_samples;
-				out += (size_t)trigger_offset * FNIRSI_DLA16_SAMPLE_UNITSIZE;
-				out_len -= (size_t)trigger_offset * FNIRSI_DLA16_SAMPLE_UNITSIZE;
+				out += (size_t)trigger_offset * devc->unitsize;
+				out_len -= (size_t)trigger_offset * devc->unitsize;
 			} else {
 				out_len = 0;
 			}
 		}
 
-		out_samples = out_len / FNIRSI_DLA16_SAMPLE_UNITSIZE;
+		out_samples = out_len / devc->unitsize;
 
 		if (out_samples > 0) {
 			if (devc->acq_limit_samples) {
@@ -796,7 +798,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 
 			if (out_samples > 0) {
 				send_logic_packet(sdi, out,
-					out_samples * FNIRSI_DLA16_SAMPLE_UNITSIZE);
+					out_samples * devc->unitsize);
 				devc->sent_samples += out_samples;
 			}
 		}
@@ -874,10 +876,8 @@ static int configure_channels(const struct sr_dev_inst *sdi)
 	const GSList *l;
 	struct sr_channel *ch;
 	unsigned int n, hw_n, i, idx;
-	unsigned int dst, v, t;
 	gboolean used[MAX_CHANNELS];
 	uint64_t max_rate;
-	uint64_t lo, hi;
 
 	devc = sdi->priv;
 	n = 0;
@@ -989,33 +989,49 @@ static int configure_channels(const struct sr_dev_inst *sdi)
 	devc->num_active = hw_n;
 	devc->group_fill = 0;
 
-	/*
-	 * Build the fast-path deinterleave() lookup tables for the current
-	 * channel selection (see chan_lut_lo/hi in protocol.h). This is only
-	 * O(num_active * 256) = at most 4096 table entries, done once here
-	 * rather than per-sample.
-	 */
+	return SR_OK;
+}
+
+/*
+ * Builds the fast-path deinterleave() lookup tables for the current channel
+ * selection and devc->unitsize (see chan_lut_lo/hi in protocol.h). This is
+ * only O(num_active * 256) = at most 4096 table entries, done once per
+ * acquisition rather than per-sample.
+ */
+static int build_deinterleave_luts(struct dev_context *devc)
+{
+	unsigned int n, dst, v, t, lane_bits;
+	uint64_t lo, hi;
+
+	lane_bits = 8 * devc->unitsize;
+
 	for (n = 0; n < devc->num_active; n++) {
 		dst = devc->active_channels[n];
 
-		if (dst >= 8 * FNIRSI_DLA16_SAMPLE_UNITSIZE) {
+		if (dst >= lane_bits) {
 			sr_err("Channel index %u has no valid bit position in "
-				"this device's %u-bit-wide wire sample word.",
-				dst, 8 * FNIRSI_DLA16_SAMPLE_UNITSIZE);
-			return SR_ERR_NA;
+				"the %u-bit-wide sample word.", dst, lane_bits);
+			return SR_ERR_BUG;
 		}
 
 		for (v = 0; v < 256; v++) {
 			lo = 0;
 			hi = 0;
 
-			for (t = 0; t < 4; t++) {
-				if ((v >> t) & 1)
-					lo |= (uint64_t)(1u << dst) << (16 * t);
-			}
-			for (t = 0; t < 4; t++) {
-				if ((v >> (t + 4)) & 1)
-					hi |= (uint64_t)(1u << dst) << (16 * t);
+			if (devc->unitsize == 1) {
+				for (t = 0; t < 8; t++) {
+					if ((v >> t) & 1)
+						lo |= (uint64_t)(1u << dst) << (8 * t);
+				}
+			} else {
+				for (t = 0; t < 4; t++) {
+					if ((v >> t) & 1)
+						lo |= (uint64_t)(1u << dst) << (16 * t);
+				}
+				for (t = 0; t < 4; t++) {
+					if ((v >> (t + 4)) & 1)
+						hi |= (uint64_t)(1u << dst) << (16 * t);
+				}
 			}
 			devc->chan_lut_lo[n][v] = lo;
 			devc->chan_lut_hi[n][v] = hi;
@@ -1163,6 +1179,15 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		devc->trigger_fired = TRUE;
 	}
 
+	/* 1-byte samples halve the data the session handles, but only fit
+	 * when every wire channel is D0-D7 (padding takes the lowest unused
+	 * channels, so it stays there too), and the software trigger always
+	 * works on 2-byte samples - one bit per channel the device has. */
+	devc->unitsize = (!devc->stl && channel_mask(devc) <= 0xFF) ?
+		1 : FNIRSI_DLA16_SAMPLE_UNITSIZE;
+	if ((ret = build_deinterleave_luts(devc)) != SR_OK)
+		goto err_free_stl;
+
 	/* Drain only here, while the device is stopped and before any
 	 * transfer is queued: a drain after the start commands would eat the
 	 * capture's own first bytes. */
@@ -1171,12 +1196,11 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	if ((ret = drain_sample_endpoint(usb->devhdl)) != SR_OK)
 		goto err_free_stl;
 
-	/* Worst case expansion is FNIRSI_DLA16_NUM_CHANNELS-fold (num_active
-	 * == 1, the fixed 2-byte-wide wire sample word is emitted in full
-	 * regardless), see protocol.h. Sized against transfer_bufsize (the
-	 * actual per-transfer buffer size for this acquisition), not the
-	 * fixed TRANSFER_BUFSIZE ceiling. */
-	devc->outbuf_size = devc->transfer_bufsize * FNIRSI_DLA16_NUM_CHANNELS;
+	/* Worst case expansion is (8 * unitsize)-fold: num_active == 1, each
+	 * wire byte becomes 8 samples of unitsize bytes. Sized against
+	 * transfer_bufsize (the actual per-transfer buffer size for this
+	 * acquisition), not the fixed TRANSFER_BUFSIZE ceiling. */
+	devc->outbuf_size = devc->transfer_bufsize * 8 * devc->unitsize;
 	devc->outbuf = g_try_malloc(devc->outbuf_size);
 	if (!devc->outbuf) {
 		sr_err("Output buffer malloc failed.");

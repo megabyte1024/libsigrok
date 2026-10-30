@@ -22,7 +22,7 @@
 #include "protocol.h"
 
 #define DEFAULT_SAMPLERATE	SR_MHZ(10)
-#define DEFAULT_THRESHOLD	1.50 /* volts, on the vendor's declared 0.1V grid */
+#define DEFAULT_THRESHOLD	1.50 /* volts */
 
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
@@ -391,10 +391,10 @@ static int fnirsi_dla_config_set(uint32_t key, GVariant *data,
 				"+/-5V range.", volts);
 			return SR_ERR_ARG;
 		}
-		hundredths = lround(volts * 10.0) * 10;
-		if (hundredths != lround(volts * 100.0)) {
-			sr_info("Rounding threshold %.2fV to %.1fV "
-				"(0.1V grid).", volts, hundredths / 100.0);
+		hundredths = lround(volts * 100.0);
+		if (fabs(volts - hundredths / 100.0) > 1e-6) {
+			sr_info("Rounding threshold %.4fV to %.2fV "
+				"(0.01V steps).", volts, hundredths / 100.0);
 		}
 		devc->threshold_hundredths = (int16_t)hundredths;
 		break;
@@ -452,7 +452,7 @@ static int fnirsi_dla_config_list(uint32_t key, GVariant **data,
 		*data = std_gvar_array_str(preset_names, ARRAY_SIZE(preset_names));
 		break;
 	case SR_CONF_LOGIC_THRESHOLD_CUSTOM:
-		*data = std_gvar_min_max_step(-5.0, 5.0, 0.1);
+		*data = std_gvar_min_max_step(-5.0, 5.0, 0.01);
 		break;
 	case SR_CONF_TRIGGER_MATCH:
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
