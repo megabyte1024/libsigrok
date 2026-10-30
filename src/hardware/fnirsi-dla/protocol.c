@@ -949,13 +949,12 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		devc->trigger_fired = TRUE;
 	}
 
+	/* Drain only here, while the device is stopped and before any
+	 * transfer is queued: a drain after the start commands would eat the
+	 * capture's own first bytes. */
 	if ((ret = send_stop(usb->devhdl)) != SR_OK)
 		goto err_free_stl;
 	drain_sample_endpoint(usb->devhdl);
-	if ((ret = send_parameter_setting(sdi)) != SR_OK)
-		goto err_free_stl;
-	if ((ret = send_simple_trigger(sdi, channel_mask(devc))) != SR_OK)
-		goto err_free_stl;
 
 	/* Worst case expansion is FNIRSI_DLA16_NUM_CHANNELS-fold (num_active
 	 * == 1, the fixed 2-byte-wide wire sample word is emitted in full
@@ -1037,7 +1036,23 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		goto err_free_outbuf;
 	}
 
+	/*
+	 * Start the device only now that every transfer is queued, so its
+	 * first bytes land in them instead of waiting in its own memory. The
+	 * header goes first: the synchronous command writes below run
+	 * libusb's event handling, so a sample transfer may complete (and
+	 * send SR_DF_LOGIC) inside them. On failure, the abort below ends
+	 * the acquisition through finish_acquisition(), which sends the
+	 * matching SR_DF_END.
+	 */
 	std_session_send_df_header(sdi);
+
+	if ((ret = send_parameter_setting(sdi)) != SR_OK ||
+			(ret = send_simple_trigger(sdi, channel_mask(devc))) != SR_OK) {
+		fnirsi_dla_abort_acquisition(sdi);
+		fnirsi_dla_drain_pending_transfers(devc);
+		return ret;
+	}
 
 	return SR_OK;
 
