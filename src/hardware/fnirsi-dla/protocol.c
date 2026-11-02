@@ -93,20 +93,23 @@ static size_t build_framed_command(uint8_t *buf, size_t buf_size, uint8_t code,
 	uint8_t body[MAX_FRAME_BODY];
 	uint32_t crc;
 
-	if (payload_len > MAX_FRAME_BODY - 2)
+	if (payload_len > MAX_FRAME_BODY - 3)
 		return 0;
 
-	body_len = payload_len + 2;
+	body_len = payload_len + 3;
 
 	frame_len = 8 + 1 + body_len + 1 + 4;
 	padded_len = (frame_len + FRAME_ALIGN - 1) & ~(size_t)(FRAME_ALIGN - 1);
 	if (padded_len > buf_size)
 		return 0;
 
+	/* The firmware reads a 16-bit LE length (payload + 2) after the
+	 * command code. */
 	body[0] = code;
-	body[1] = (uint8_t)(payload_len + 1);
+	body[1] = (uint8_t)((payload_len + 2) & 0xFF);
+	body[2] = (uint8_t)((payload_len + 2) >> 8);
 	if (payload && payload_len)
-		memcpy(body + 2, payload, payload_len);
+		memcpy(body + 3, payload, payload_len);
 
 	crc = gcrc32(body, body_len);
 
@@ -126,14 +129,35 @@ static size_t build_framed_command(uint8_t *buf, size_t buf_size, uint8_t code,
 	return padded_len;
 }
 
-static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
+/*
+ * Writes buf, up to max_writes times while the device takes none of it:
+ * the write then times out with 0 bytes taken, and the same packet sent
+ * again usually goes through at once. Only a 512-byte direct command that
+ * changes no device state may be written more than once - such a packet is
+ * taken whole or not at all, so the device never runs it twice.
+ */
+static int bulk_out_retry(libusb_device_handle *devhdl, const uint8_t *buf,
+		int len, int max_writes)
 {
-	int actual, ret;
+	int actual, ret, write;
 
-	ret = libusb_bulk_transfer(devhdl, EP_CMD_OUT, (unsigned char *)buf,
-			len, &actual, USB_TIMEOUT_MS);
+	for (write = 1; ; write++) {
+		actual = 0;
+		ret = libusb_bulk_transfer(devhdl, EP_CMD_OUT,
+				(unsigned char *)buf, len, &actual, USB_TIMEOUT_MS);
+		if (ret != LIBUSB_ERROR_TIMEOUT || actual != 0 ||
+				write >= max_writes)
+			break;
+		sr_warn("Command 0x%02x was not taken by the device, sending "
+			"it again (write %d of %d).", buf[1], write + 1,
+			max_writes);
+	}
 	if (ret < 0) {
-		sr_err("Bulk OUT failed: %s.", libusb_error_name(ret));
+		if (write > 1)
+			sr_err("Bulk OUT failed: %s, after %d writes.",
+				libusb_error_name(ret), write);
+		else
+			sr_err("Bulk OUT failed: %s.", libusb_error_name(ret));
 		return SR_ERR_IO;
 	}
 	if (actual != len) {
@@ -144,7 +168,14 @@ static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
 	return SR_OK;
 }
 
-/* Sends a direct command without payload and reads its reply. */
+static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
+{
+	return bulk_out_retry(devhdl, buf, len, 1);
+}
+
+/* Sends a direct command without payload and reads its reply. Only for
+ * queries that change no device state, as the command may be written more
+ * than once (see bulk_out_retry()). */
 static int direct_command_reply(libusb_device_handle *devhdl, uint8_t subcmd,
 		uint8_t *reply, int *reply_len)
 {
@@ -152,7 +183,8 @@ static int direct_command_reply(libusb_device_handle *devhdl, uint8_t subcmd,
 	int ret;
 
 	build_direct_command(buf, subcmd, NULL, 0);
-	if ((ret = bulk_out(devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+	if ((ret = bulk_out_retry(devhdl, buf, USB_CMD_SIZE,
+			QUERY_MAX_WRITES)) != SR_OK)
 		return ret;
 
 	*reply_len = 0;
@@ -167,15 +199,23 @@ static int direct_command_reply(libusb_device_handle *devhdl, uint8_t subcmd,
 	return SR_OK;
 }
 
-static int check_mcu_version_reply(const uint8_t *reply, int len)
+static int check_mcu_version_reply(struct dev_context *devc,
+		const uint8_t *reply, int len)
 {
 	if (len < 9 || reply[0] != 0x0A || reply[1] != CMD_GET_MCU_VERSION ||
-			reply[2] != 0x01) {
+			reply[2] != 0x01 ||
+			(reply[3] != 0x61 && reply[3] != 0x62)) {
 		sr_err("Malformed GetMCUVersion reply.");
 		return SR_ERR_DATA;
 	}
-	if (reply[3] != 0x61) {
-		sr_err("Device is in bootloader mode, not application mode.");
+	/* Byte 3 only says what starts next (0x61 application, 0x62
+	 * bootloader), not what runs now: the running bootloader is told
+	 * apart by its firmware version 0.0. */
+	if (reply[4] == 0 && reply[5] == 0) {
+		devc->in_bootloader = TRUE;
+		sr_err("Device is in bootloader mode, not application mode "
+			"(firmware version 0.0). Complete a firmware update "
+			"first.");
 		return SR_ERR;
 	}
 
@@ -200,12 +240,10 @@ static int parse_device_data_reply(struct sr_dev_inst *sdi,
 		sr_err("Malformed GetDeviceData reply.");
 		return SR_ERR_DATA;
 	}
-	if (reply[6] != 0x01) {
-		sr_err("Device reports its FPGA is not healthy.");
-		return SR_ERR;
-	}
 
-	sr_info("FPGA firmware version %u.", reply[9] * 100u + reply[10]);
+	/* Byte 6 is a constant 1, not an FPGA health flag, and bytes 9-10
+	 * hold the MCU's built-in default 1.0, not the FPGA firmware's
+	 * version: neither is checked or shown. */
 
 	memcpy(code, reply + 13, 4);
 	code[4] = '\0';
@@ -246,6 +284,7 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 	usb = sdi->conn;
 
 	devc->device_gone = FALSE;
+	devc->in_bootloader = FALSE;
 
 	if ((ret = direct_command_reply(usb->devhdl, CMD_FLUSH,
 			reply, &actual)) != SR_OK)
@@ -254,7 +293,7 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_MCU_VERSION,
 			reply, &actual)) != SR_OK)
 		return ret;
-	if ((ret = check_mcu_version_reply(reply, actual)) != SR_OK)
+	if ((ret = check_mcu_version_reply(devc, reply, actual)) != SR_OK)
 		return ret;
 
 	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_DEVICE_DATA,
@@ -275,11 +314,9 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 static int send_stop(libusb_device_handle *devhdl)
 {
 	uint8_t buf[FRAME_ALIGN];
-	uint8_t payload;
 	size_t len;
 
-	payload = 0x00;
-	len = build_framed_command(buf, sizeof(buf), CMD_STOP, &payload, 1);
+	len = build_framed_command(buf, sizeof(buf), CMD_STOP, NULL, 0);
 
 	if (len == 0) {
 		sr_err("Internal error building the Stop command.");
@@ -291,7 +328,8 @@ static int send_stop(libusb_device_handle *devhdl)
 
 /* Sent last before a claimed interface is released, once no acquisition
  * runs. Not sent when claiming the interface failed: another program may
- * be capturing from the device then. */
+ * be capturing from the device then. Not sent to the bootloader either:
+ * it is an application command. */
 SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
@@ -302,7 +340,7 @@ SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
 	devc = sdi->priv;
 	usb = sdi->conn;
 
-	if (devc->device_gone)
+	if (devc->device_gone || devc->in_bootloader)
 		return SR_OK;
 
 	len = build_framed_command(buf, sizeof(buf), CMD_EXIT, NULL, 0);
@@ -393,54 +431,49 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
-	uint8_t payload[29];
+	uint8_t payload[28];
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
 	/*
-	 * ALWAYS 0. This is the ONLY thing that selects Streaming vs Buffer
-	 * mode - depth=0 is Streaming mode, any nonzero value is Buffer mode.
-	 * This driver must never use Buffer mode, so this is a plain
-	 * hardcoded literal, not derived from any config option - there is
-	 * no code path anywhere in this driver that can set it to anything
-	 * else.
+	 * Only used in Buffer mode, which offset 1 selects - this driver
+	 * always leaves offset 1 at 0 (Streaming mode) and never uses
+	 * Buffer mode, so this is a plain hardcoded literal.
 	 */
 	const uint32_t depth = 0;
 
 	devc = sdi->priv;
 	usb = sdi->conn;
 
+	/* The firmware reads only offsets 1, 2, 9-11 and 16-27; offsets 0,
+	 * 3-8 and 12-15 are never read. */
 	memset(payload, 0, sizeof(payload));
-	/* Offsets 0-3: NOT safe to touch (hangs / non-reproducible behaviour) -
-	 * always left at 0. */
-	/* Offset 4: no effect seen across its full 0-255 range - sent as 1. */
-	payload[4] = 0x01;
-	/* Offsets 6-9: sample rate in Hz, u32 LE. */
-	payload[6] = (uint8_t)(devc->cur_samplerate & 0xFF);
-	payload[7] = (uint8_t)((devc->cur_samplerate >> 8) & 0xFF);
-	payload[8] = (uint8_t)((devc->cur_samplerate >> 16) & 0xFF);
-	payload[9] = (uint8_t)((devc->cur_samplerate >> 24) & 0xFF);
-	/* Offset 10: rate-table index, required alongside offsets 6-9. */
-	payload[10] = devc->cur_rate_idx;
-	/* Offsets 11-12: threshold voltage, signed 16-bit LE, hundredths of
+	/* Offset 1: Buffer mode flag - 0 is Streaming mode. */
+	/* Offset 2: sub-mode, 0 - written to an FPGA register. */
+	/* Offset 3: never read - sent as 1, as FNIRSI's software does. */
+	payload[3] = 0x01;
+	/* Offsets 5-8: sample rate in Hz, u32 LE - never read, sent as
+	 * FNIRSI's software does; offset 9 sets the rate. */
+	payload[5] = (uint8_t)(devc->cur_samplerate & 0xFF);
+	payload[6] = (uint8_t)((devc->cur_samplerate >> 8) & 0xFF);
+	payload[7] = (uint8_t)((devc->cur_samplerate >> 16) & 0xFF);
+	payload[8] = (uint8_t)((devc->cur_samplerate >> 24) & 0xFF);
+	/* Offset 9: rate-table index. */
+	payload[9] = devc->cur_rate_idx;
+	/* Offsets 10-11: threshold voltage, signed 16-bit LE, hundredths of
 	 * a volt. */
-	payload[11] = (uint8_t)(devc->threshold_hundredths & 0xFF);
-	payload[12] = (uint8_t)((devc->threshold_hundredths >> 8) & 0xFF);
-	/* Offset 13: threshold preset selector - cosmetic only, no effect on
-	 * the actual comparator threshold. 0 = custom. */
-	payload[13] = 0x00;
-	/* Offsets 14-17: no effect - 0 is fine. */
-	/* Offsets 18-20: unknown, always 0 in every capture seen. */
-	/* Offsets 21-24: depth, u32 LE - Streaming mode iff 0. */
-	payload[21] = (uint8_t)(depth & 0xFF);
-	payload[22] = (uint8_t)((depth >> 8) & 0xFF);
-	payload[23] = (uint8_t)((depth >> 16) & 0xFF);
-	payload[24] = (uint8_t)((depth >> 24) & 0xFF);
-	/* Offsets 25-28: unknown, always 0 in every capture seen. */
+	payload[10] = (uint8_t)(devc->threshold_hundredths & 0xFF);
+	payload[11] = (uint8_t)((devc->threshold_hundredths >> 8) & 0xFF);
+	/* Offsets 16-19 and 24-27: meaning unknown, 0 works for Streaming
+	 * mode. */
+	/* Offsets 20-23: depth, u32 LE - only used in Buffer mode. */
+	payload[20] = (uint8_t)(depth & 0xFF);
+	payload[21] = (uint8_t)((depth >> 8) & 0xFF);
+	payload[22] = (uint8_t)((depth >> 16) & 0xFF);
+	payload[23] = (uint8_t)((depth >> 24) & 0xFF);
 
 	sr_info("ParameterSetting: rate=%" PRIu64 "Hz idx=0x%02x threshold=%.2fV "
-		"depth=%u (%s).", devc->cur_samplerate, devc->cur_rate_idx,
-		devc->threshold_hundredths / 100.0, depth,
-		depth == 0 ? "Streaming mode" : "BUG: Buffer mode - must never happen");
+		"(Streaming mode).", devc->cur_samplerate, devc->cur_rate_idx,
+		devc->threshold_hundredths / 100.0);
 
 	len = build_framed_command(buf, sizeof(buf), CMD_PARAMETER_SETTING,
 			payload, sizeof(payload));
@@ -455,15 +488,18 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 static int send_simple_trigger(const struct sr_dev_inst *sdi, uint16_t channel_mask)
 {
 	struct sr_usb_dev_inst *usb;
-	uint8_t payload[38];
+	uint8_t payload[37];
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
 
 	usb = sdi->conn;
 
 	memset(payload, 0, sizeof(payload));
-	payload[2] = (uint8_t)(channel_mask & 0xFF);
-	payload[3] = (uint8_t)((channel_mask >> 8) & 0xFF);
+	/* Offsets 1-2: channel mask, u16 LE. */
+	payload[1] = (uint8_t)(channel_mask & 0xFF);
+	payload[2] = (uint8_t)((channel_mask >> 8) & 0xFF);
+	/* Offset 8: hardware trigger type, 0 = none. Types 1-5 wait for a
+	 * condition on D3 only, so the software trigger is used instead. */
 
 	len = build_framed_command(buf, sizeof(buf), CMD_SIMPLE_TRIGGER,
 			payload, sizeof(payload));
@@ -759,9 +795,10 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		deinterleave(devc, data, len, &out, &out_len);
 
 		/*
-		 * Software trigger: the device streams unconditionally
-		 * regardless of the (non-functional) hardware trigger byte,
-		 * so withhold data until the host-side scan finds the match,
+		 * Software trigger: the device streams unconditionally (its
+		 * hardware trigger type is left at 0, see
+		 * send_simple_trigger()), so withhold data until the
+		 * host-side scan finds the match,
 		 * then start sending from exactly that sample onward.
 		 */
 		if (devc->stl && !devc->trigger_fired) {
@@ -811,6 +848,12 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		sr_err("Device stopped producing data (%u consecutive empty "
 			"transfers), aborting acquisition.",
 			devc->empty_transfer_count);
+		/* What a damaged FPGA image looks like, e.g. after an
+		 * interrupted firmware update. */
+		if (devc->received_bytes == 0)
+			sr_err("The device answers commands but sent no "
+				"sample data at all: its FPGA image may be "
+				"damaged. Update its firmware.");
 		abort_acquisition_in_callback(devc);
 	}
 

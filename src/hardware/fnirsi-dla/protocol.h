@@ -72,6 +72,8 @@
 #define USB_TIMEOUT_MS		2000
 /* How long a direct command's reply may take. */
 #define CMD_REPLY_TIMEOUT_MS	1000
+/* How many times a query the device didn't take is written in all. */
+#define QUERY_MAX_WRITES	6
 
 #define DRAIN_POLL_INTERVAL_MS	100
 #define DRAIN_MAX_WAIT_MS	(USB_TIMEOUT_MS * 2)
@@ -116,7 +118,7 @@ struct dev_context {
 	uint8_t cur_rate_idx;
 
 	/* Threshold voltage, hundredths of a volt, signed 16-bit range as
-	 * used on the wire (0x11 payload offsets 11-12). Vendor-declared
+	 * used on the wire (0x11 payload offsets 10-11). Vendor-declared
 	 * range is +/-5.00V; any 0.01V step is accepted and sent, though
 	 * the vendor software offers 0.1V steps only. */
 	int16_t threshold_hundredths;
@@ -184,6 +186,9 @@ struct dev_context {
 	/* Set when a transfer reported the device unplugged: no Stop or Exit
 	 * is sent to it any more. */
 	gboolean device_gone;
+	/* Set when connect found the device in its bootloader: no Exit is
+	 * sent to it. */
+	gboolean in_bootloader;
 
 	/* Number of physical logic channels the connected device actually
 	 * has - detected at scan time (see scan() in api.c), always
