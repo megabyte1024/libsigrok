@@ -19,7 +19,9 @@
 
 #include <config.h>
 #include <limits.h>
+#include <string.h>
 #include "protocol.h"
+#include "wch.h"
 
 /* Rate table (see struct fnirsi_dla_rate in protocol.h). Index 0x0F is
  * invalid (falls back to ~40MHz) and is deliberately omitted here. */
@@ -129,6 +131,44 @@ static size_t build_framed_command(uint8_t *buf, size_t buf_size, uint8_t code,
 	return padded_len;
 }
 
+static int libusb_code_of(enum dla_wch_result result)
+{
+	switch (result) {
+	case DLA_WCH_OK:
+		return LIBUSB_SUCCESS;
+	case DLA_WCH_TIMEOUT:
+		return LIBUSB_ERROR_TIMEOUT;
+	case DLA_WCH_HALTED:
+		return LIBUSB_ERROR_PIPE;
+	case DLA_WCH_CANCELLED:
+		return LIBUSB_ERROR_INTERRUPTED;
+	case DLA_WCH_NO_DEVICE:
+		return LIBUSB_ERROR_NO_DEVICE;
+	case DLA_WCH_BUSY:
+		return LIBUSB_ERROR_BUSY;
+	case DLA_WCH_ACCESS:
+		return LIBUSB_ERROR_ACCESS;
+	default:
+		return LIBUSB_ERROR_IO;
+	}
+}
+
+/* libusb_bulk_transfer(), through WCH's driver when the device is on it. */
+static int dla_bulk(const struct sr_dev_inst *sdi, unsigned char endpoint,
+		unsigned char *buf, int len, int *actual, unsigned int timeout_ms)
+{
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
+
+	devc = sdi->priv;
+	usb = sdi->conn;
+	if (devc->wch)
+		return libusb_code_of(dla_wch_bulk(devc->wch, endpoint, buf,
+				len, actual, timeout_ms));
+	return libusb_bulk_transfer(usb->devhdl, endpoint, buf, len, actual,
+			timeout_ms);
+}
+
 /*
  * Writes buf, up to max_writes times while the device takes none of it:
  * the write then times out with 0 bytes taken, and the same packet sent
@@ -136,14 +176,21 @@ static size_t build_framed_command(uint8_t *buf, size_t buf_size, uint8_t code,
  * changes no device state may be written more than once - such a packet is
  * taken whole or not at all, so the device never runs it twice.
  */
-static int bulk_out_retry(libusb_device_handle *devhdl, const uint8_t *buf,
+static int bulk_out_retry(const struct sr_dev_inst *sdi, const uint8_t *buf,
 		int len, int max_writes)
 {
+	struct dev_context *devc;
 	int actual, ret, write;
+
+	devc = sdi->priv;
+	/* A write WCH's driver timed out and cancelled may leave the device
+	 * taking no command until it is replugged: never sent twice there. */
+	if (devc->wch)
+		max_writes = 1;
 
 	for (write = 1; ; write++) {
 		actual = 0;
-		ret = libusb_bulk_transfer(devhdl, EP_CMD_OUT,
+		ret = dla_bulk(sdi, EP_CMD_OUT,
 				(unsigned char *)buf, len, &actual, USB_TIMEOUT_MS);
 		if (ret != LIBUSB_ERROR_TIMEOUT || actual != 0 ||
 				write >= max_writes)
@@ -158,6 +205,10 @@ static int bulk_out_retry(libusb_device_handle *devhdl, const uint8_t *buf,
 				libusb_error_name(ret), write);
 		else
 			sr_err("Bulk OUT failed: %s.", libusb_error_name(ret));
+		if (devc->wch && (ret == LIBUSB_ERROR_TIMEOUT ||
+				ret == LIBUSB_ERROR_PIPE))
+			sr_err("Unplug and replug the device: WCH's driver "
+				"cannot recover it otherwise.");
 		return SR_ERR_IO;
 	}
 	if (actual != len) {
@@ -168,27 +219,27 @@ static int bulk_out_retry(libusb_device_handle *devhdl, const uint8_t *buf,
 	return SR_OK;
 }
 
-static int bulk_out(libusb_device_handle *devhdl, const uint8_t *buf, int len)
+static int bulk_out(const struct sr_dev_inst *sdi, const uint8_t *buf, int len)
 {
-	return bulk_out_retry(devhdl, buf, len, 1);
+	return bulk_out_retry(sdi, buf, len, 1);
 }
 
 /* Sends a direct command without payload and reads its reply. Only for
  * queries that change no device state, as the command may be written more
  * than once (see bulk_out_retry()). */
-static int direct_command_reply(libusb_device_handle *devhdl, uint8_t subcmd,
+static int direct_command_reply(const struct sr_dev_inst *sdi, uint8_t subcmd,
 		uint8_t *reply, int *reply_len)
 {
 	uint8_t buf[USB_CMD_SIZE];
 	int ret;
 
 	build_direct_command(buf, subcmd, NULL, 0);
-	if ((ret = bulk_out_retry(devhdl, buf, USB_CMD_SIZE,
+	if ((ret = bulk_out_retry(sdi, buf, USB_CMD_SIZE,
 			QUERY_MAX_WRITES)) != SR_OK)
 		return ret;
 
 	*reply_len = 0;
-	ret = libusb_bulk_transfer(devhdl, EP_CMD_REPLY_IN, reply,
+	ret = dla_bulk(sdi, EP_CMD_REPLY_IN, reply,
 			USB_CMD_SIZE, reply_len, CMD_REPLY_TIMEOUT_MS);
 	if (ret != LIBUSB_SUCCESS) {
 		sr_err("Reading the reply to command 0x%02x failed: %s.",
@@ -274,29 +325,27 @@ static int parse_device_data_reply(struct sr_dev_inst *sdi,
 SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
 	uint8_t buf[FRAME_ALIGN];
 	uint8_t reply[USB_CMD_SIZE];
 	uint8_t payload;
 	int ret, actual;
 
 	devc = sdi->priv;
-	usb = sdi->conn;
 
 	devc->device_gone = FALSE;
 	devc->in_bootloader = FALSE;
 
-	if ((ret = direct_command_reply(usb->devhdl, CMD_FLUSH,
+	if ((ret = direct_command_reply(sdi, CMD_FLUSH,
 			reply, &actual)) != SR_OK)
 		return ret;
 
-	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_MCU_VERSION,
+	if ((ret = direct_command_reply(sdi, CMD_GET_MCU_VERSION,
 			reply, &actual)) != SR_OK)
 		return ret;
 	if ((ret = check_mcu_version_reply(devc, reply, actual)) != SR_OK)
 		return ret;
 
-	if ((ret = direct_command_reply(usb->devhdl, CMD_GET_DEVICE_DATA,
+	if ((ret = direct_command_reply(sdi, CMD_GET_DEVICE_DATA,
 			reply, &actual)) != SR_OK)
 		return ret;
 	if ((ret = parse_device_data_reply(sdi, reply, actual)) != SR_OK)
@@ -304,14 +353,14 @@ SR_PRIV int fnirsi_dla_connect(struct sr_dev_inst *sdi)
 
 	payload = 0x01;
 	build_direct_command(buf, CMD_SET_RESET_STATE, &payload, 1);
-	if ((ret = bulk_out(usb->devhdl, buf, USB_CMD_SIZE)) != SR_OK)
+	if ((ret = bulk_out(sdi, buf, USB_CMD_SIZE)) != SR_OK)
 		return ret;
 	g_usleep(200 * 1000);
 
 	return SR_OK;
 }
 
-static int send_stop(libusb_device_handle *devhdl)
+static int send_stop(const struct sr_dev_inst *sdi)
 {
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
@@ -323,7 +372,7 @@ static int send_stop(libusb_device_handle *devhdl)
 		return SR_ERR_BUG;
 	}
 
-	return bulk_out(devhdl, buf, (int)len);
+	return bulk_out(sdi, buf, (int)len);
 }
 
 /* Sent last before a claimed interface is released, once no acquisition
@@ -333,12 +382,10 @@ static int send_stop(libusb_device_handle *devhdl)
 SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
 
 	devc = sdi->priv;
-	usb = sdi->conn;
 
 	if (devc->device_gone || devc->in_bootloader)
 		return SR_OK;
@@ -349,22 +396,20 @@ SR_PRIV int fnirsi_dla_send_exit(const struct sr_dev_inst *sdi)
 		return SR_ERR_BUG;
 	}
 
-	return bulk_out(usb->devhdl, buf, (int)len);
+	return bulk_out(sdi, buf, (int)len);
 }
 
 SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
 
 	devc = sdi->priv;
-	usb = sdi->conn;
 
 	if (!devc->stop_pending)
 		return;
 	devc->stop_pending = FALSE;
 	devc->stop_sent = TRUE;
-	send_stop(usb->devhdl);
+	send_stop(sdi);
 }
 
 /*
@@ -372,7 +417,7 @@ SR_PRIV void fnirsi_dla_send_pending_stop(const struct sr_dev_inst *sdi)
  * read gets nothing. Fails if the device is still sending after
  * STALE_DRAIN_LIMIT_MS: that data would otherwise start the acquisition.
  */
-static int drain_sample_endpoint(libusb_device_handle *devhdl)
+static int drain_sample_endpoint(const struct sr_dev_inst *sdi)
 {
 	uint8_t *buf;
 	int actual, ret;
@@ -389,7 +434,7 @@ static int drain_sample_endpoint(libusb_device_handle *devhdl)
 	start_us = g_get_monotonic_time();
 	for (;;) {
 		actual = 0;
-		ret = libusb_bulk_transfer(devhdl, EP_SAMPLE_IN, buf,
+		ret = dla_bulk(sdi, EP_SAMPLE_IN, buf,
 				STALE_READ_BYTES, &actual, STALE_READ_TIMEOUT_MS);
 		/* A read that timed out may still have carried data. */
 		if (ret != LIBUSB_SUCCESS && ret != LIBUSB_ERROR_TIMEOUT) {
@@ -430,7 +475,6 @@ static int drain_sample_endpoint(libusb_device_handle *devhdl)
 static int send_parameter_setting(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
 	uint8_t payload[28];
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
@@ -442,7 +486,6 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 	const uint32_t depth = 0;
 
 	devc = sdi->priv;
-	usb = sdi->conn;
 
 	/* The firmware reads only offsets 1, 2, 9-11 and 16-27; offsets 0,
 	 * 3-8 and 12-15 are never read. */
@@ -482,17 +525,15 @@ static int send_parameter_setting(const struct sr_dev_inst *sdi)
 		return SR_ERR_BUG;
 	}
 
-	return bulk_out(usb->devhdl, buf, (int)len);
+	return bulk_out(sdi, buf, (int)len);
 }
 
 static int send_simple_trigger(const struct sr_dev_inst *sdi, uint16_t channel_mask)
 {
-	struct sr_usb_dev_inst *usb;
 	uint8_t payload[37];
 	uint8_t buf[FRAME_ALIGN];
 	size_t len;
 
-	usb = sdi->conn;
 
 	memset(payload, 0, sizeof(payload));
 	/* Offsets 1-2: channel mask, u16 LE. */
@@ -508,7 +549,7 @@ static int send_simple_trigger(const struct sr_dev_inst *sdi, uint16_t channel_m
 		return SR_ERR_BUG;
 	}
 
-	return bulk_out(usb->devhdl, buf, (int)len);
+	return bulk_out(sdi, buf, (int)len);
 }
 
 static void finish_acquisition(struct sr_dev_inst *sdi)
@@ -525,7 +566,20 @@ static void finish_acquisition(struct sr_dev_inst *sdi)
 	if (!devc->stop_sent && !devc->device_gone)
 		devc->stop_pending = TRUE;
 
-	usb_source_remove(sdi->session, devc->ctx);
+	if (devc->wch_stream) {
+		sr_session_source_remove(sdi->session, -1);
+		dla_wch_stream_free(devc->wch_stream);
+		devc->wch_stream = NULL;
+		g_free(devc->wch_chunk);
+		devc->wch_chunk = NULL;
+		if (devc->acq_failed) {
+			devc->wch_replug_needed = TRUE;
+			sr_err("Capture failed: unplug and replug the device, "
+				"WCH's driver cannot recover it otherwise.");
+		}
+	} else {
+		usb_source_remove(sdi->session, devc->ctx);
+	}
 
 	devc->num_transfers = 0;
 	g_free(devc->transfers);
@@ -676,6 +730,8 @@ static void cancel_transfers(struct dev_context *devc)
 static void abort_acquisition_in_callback(struct dev_context *devc)
 {
 	devc->acq_aborted = TRUE;
+	if (devc->wch_stream)
+		dla_wch_stream_cancel(devc->wch_stream);
 	cancel_transfers(devc);
 }
 
@@ -723,9 +779,11 @@ static void drop_preroll(struct dev_context *devc, const uint8_t **data,
 	devc->preroll_bytes_left -= drop;
 }
 
-static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
+/* One finished read, from libusb or from WCH's driver. Returns TRUE when
+ * the read is to be queued again. */
+static gboolean handle_chunk(struct sr_dev_inst *sdi, int status,
+		const uint8_t *buffer, int actual_length)
 {
-	struct sr_dev_inst *sdi;
 	struct dev_context *devc;
 	const uint8_t *data;
 	size_t len;
@@ -734,12 +792,10 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	size_t out_len, out_samples;
 	int pre_trigger_samples, trigger_offset;
 
-	sdi = transfer->user_data;
 	devc = sdi->priv;
 
 	if (devc->acq_aborted) {
-		free_transfer(transfer);
-		return;
+		return FALSE;
 	}
 
 	/*
@@ -748,37 +804,37 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	 * immediately, turning resubmission into an unbounded tight loop.
 	 * Treat all of them as a hard, immediate end to the acquisition.
 	 */
-	if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE ||
-			transfer->status == LIBUSB_TRANSFER_STALL ||
-			transfer->status == LIBUSB_TRANSFER_ERROR ||
-			transfer->status == LIBUSB_TRANSFER_OVERFLOW) {
+	if (status == LIBUSB_TRANSFER_NO_DEVICE ||
+			status == LIBUSB_TRANSFER_STALL ||
+			status == LIBUSB_TRANSFER_ERROR ||
+			status == LIBUSB_TRANSFER_OVERFLOW) {
 		sr_err("USB transfer failed (%s), aborting acquisition.",
-				libusb_error_name(transfer->status));
-		if (transfer->status == LIBUSB_TRANSFER_NO_DEVICE)
+				libusb_error_name(status));
+		if (status == LIBUSB_TRANSFER_NO_DEVICE)
 			devc->device_gone = TRUE;
+		devc->acq_failed = TRUE;
 		abort_acquisition_in_callback(devc);
-		free_transfer(transfer);
-		return;
+		return FALSE;
 	}
 
-	if (transfer->actual_length > 0)
+	if (actual_length > 0)
 		devc->empty_transfer_count = 0;
 	else
 		devc->empty_transfer_count++;
 
 	/* The transfer that shows the lag isn't delivered: data may already
 	 * be missing before it. */
-	if (transfer->actual_length > 0 && !devc->limit_reached) {
-		lag = delivery_lag(devc, (size_t)transfer->actual_length);
+	if (actual_length > 0 && !devc->limit_reached) {
+		lag = delivery_lag(devc, (size_t)actual_length);
 		if (lag >= LAG_LIMIT_BYTES) {
 			sr_err("Delivery fell %" PRIu64 " MiB (%" PRIu64 " ms) "
 				"behind sampling, the device may drop data - "
 				"aborting acquisition. Lower the samplerate or "
 				"the channel count.", lag / (1024 * 1024),
 				lag * 1000 / devc->wire_bytes_per_sec);
+			devc->acq_failed = TRUE;
 			abort_acquisition_in_callback(devc);
-			free_transfer(transfer);
-			return;
+			return FALSE;
 		}
 	}
 
@@ -787,8 +843,8 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	 * from transfers that were already in flight at that point (and were
 	 * deliberately allowed to drain naturally rather than being
 	 * cancelled, see below) is simply discarded here. */
-	data = transfer->buffer;
-	len = transfer->actual_length > 0 ? (size_t)transfer->actual_length : 0;
+	data = buffer;
+	len = actual_length > 0 ? (size_t)actual_length : 0;
 	drop_preroll(devc, &data, &len);
 
 	if (len > 0 && !devc->limit_reached) {
@@ -854,6 +910,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			sr_err("The device answers commands but sent no "
 				"sample data at all: its FPGA image may be "
 				"damaged. Update its firmware.");
+		devc->acq_failed = TRUE;
 		abort_acquisition_in_callback(devc);
 	}
 
@@ -867,10 +924,19 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	 * transfer go; free_transfer() finishes the acquisition once every
 	 * outstanding transfer has been freed this way.
 	 */
-	if (devc->acq_aborted || devc->limit_reached)
-		free_transfer(transfer);
-	else
+	return !(devc->acq_aborted || devc->limit_reached);
+}
+
+static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
+{
+	struct sr_dev_inst *sdi;
+
+	sdi = transfer->user_data;
+	if (handle_chunk(sdi, transfer->status, transfer->buffer,
+			transfer->actual_length))
 		resubmit_transfer(transfer);
+	else
+		free_transfer(transfer);
 }
 
 static int receive_data(int fd, int revents, void *cb_data)
@@ -895,18 +961,118 @@ static int receive_data(int fd, int revents, void *cb_data)
 	return TRUE;
 }
 
+static int wch_transfer_status(enum dla_wch_result result)
+{
+	switch (result) {
+	case DLA_WCH_OK:
+		return LIBUSB_TRANSFER_COMPLETED;
+	case DLA_WCH_TIMEOUT:
+		return LIBUSB_TRANSFER_TIMED_OUT;
+	case DLA_WCH_HALTED:
+		return LIBUSB_TRANSFER_STALL;
+	case DLA_WCH_CANCELLED:
+		return LIBUSB_TRANSFER_CANCELLED;
+	case DLA_WCH_NO_DEVICE:
+		return LIBUSB_TRANSFER_NO_DEVICE;
+	default:
+		return LIBUSB_TRANSFER_ERROR;
+	}
+}
+
+/*
+ * The session's poll while the device streams through WCH's driver: hands
+ * the reads that are done to handle_chunk() in the order they were queued,
+ * queues them again, and ends the acquisition once none is left. The
+ * driver's long stream timeout never ends a read, so a device that stops
+ * sending is noticed here.
+ */
+static int receive_wch_data(int fd, int revents, void *cb_data)
+{
+	struct sr_dev_inst *sdi;
+	struct dev_context *devc;
+	const uint8_t *data;
+	enum dla_wch_result result, resubmit;
+	unsigned int slot, n;
+	size_t len;
+	int64_t now_ms;
+
+	(void)fd;
+	(void)revents;
+
+	sdi = cb_data;
+	devc = sdi->priv;
+
+	for (n = 0; devc->wch_stream && n < 2 * WCH_NUM_READS; n++) {
+		if (!dla_wch_stream_next(devc->wch_stream,
+				n == 0 ? WCH_POLL_WAIT_MS : 0, &slot, &result,
+				&data, &len))
+			break;
+		if (len > 0)
+			devc->wch_last_data_ms = g_get_monotonic_time() / 1000;
+
+		/* Queue the read again before its data is handled, from a
+		 * copy: fewer reads waiting at WCH's driver is what makes it
+		 * fall behind. */
+		if (len > 0)
+			memcpy(devc->wch_chunk, data, len);
+		if (result == DLA_WCH_OK && !devc->acq_aborted &&
+				!devc->limit_reached) {
+			resubmit = dla_wch_stream_submit(devc->wch_stream, slot);
+			if (resubmit != DLA_WCH_OK) {
+				sr_err("Failed to queue a read on WCH's driver: "
+					"%s.", dla_wch_result_name(resubmit));
+				devc->acq_failed = TRUE;
+				abort_acquisition_in_callback(devc);
+			}
+		}
+
+		if (!handle_chunk(sdi, wch_transfer_status(result),
+				devc->wch_chunk, (int)len) &&
+				devc->wch_stream)
+			dla_wch_stream_cancel(devc->wch_stream);
+	}
+
+	if (devc->wch_stream && !devc->acq_aborted && !devc->limit_reached) {
+		now_ms = g_get_monotonic_time() / 1000;
+		if (now_ms - devc->wch_last_data_ms >= WCH_SILENCE_MS) {
+			sr_err("Device stopped producing data (nothing in %d "
+				"ms), aborting acquisition.", WCH_SILENCE_MS);
+			if (devc->received_bytes == 0)
+				sr_err("The device answers commands but sent "
+					"no sample data at all: its FPGA image "
+					"may be damaged. Update its firmware.");
+			devc->acq_failed = TRUE;
+			abort_acquisition_in_callback(devc);
+		}
+	}
+
+	if (devc->wch_stream && dla_wch_stream_queued(devc->wch_stream) == 0)
+		finish_acquisition(sdi);
+
+	/* Only now that no read is queued: WCH's driver does not take Stop
+	 * while reads are queued. */
+	fnirsi_dla_send_pending_stop(sdi);
+
+	return TRUE;
+}
+
 SR_PRIV void fnirsi_dla_abort_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_usb_dev_inst *usb;
 
 	devc = sdi->priv;
-	usb = sdi->conn;
 
 	devc->acq_aborted = TRUE;
 
+	/* WCH's driver does not take Stop while reads are queued: cancel them
+	 * first; finish_acquisition() then leaves Stop pending. */
+	if (devc->wch_stream) {
+		dla_wch_stream_cancel(devc->wch_stream);
+		return;
+	}
+
 	if (!devc->device_gone)
-		send_stop(usb->devhdl);
+		send_stop(sdi);
 	devc->stop_sent = TRUE;
 	devc->stop_pending = FALSE;
 
@@ -1126,6 +1292,11 @@ SR_PRIV void fnirsi_dla_drain_pending_transfers(struct dev_context *devc)
 	tv.tv_usec = DRAIN_POLL_INTERVAL_MS * 1000;
 
 	max_iterations = DRAIN_MAX_WAIT_MS / DRAIN_POLL_INTERVAL_MS;
+	if (devc->wch_stream) {
+		for (i = 0; i < max_iterations && devc->wch_stream; i++)
+			receive_wch_data(-1, 0, (void *)devc->wch_sdi);
+		return;
+	}
 	for (i = 0; i < max_iterations && devc->transfers; i++)
 		libusb_handle_events_timeout(devc->ctx->libusb_ctx, &tv);
 }
@@ -1138,6 +1309,61 @@ static uint64_t preroll_bytes(uint64_t samplerate, unsigned int hw_n)
 	groups = (samples + 7) / 8;
 
 	return groups * hw_n;
+}
+
+static int start_wch_stream(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	enum dla_wch_result result;
+	unsigned int i;
+	int ret;
+
+	devc = sdi->priv;
+
+	devc->wch_chunk = g_try_malloc(devc->transfer_bufsize);
+	devc->wch_stream = devc->wch_chunk ? dla_wch_stream_new(devc->wch,
+			EP_SAMPLE_IN, WCH_NUM_READS, devc->transfer_bufsize) : NULL;
+	if (!devc->wch_stream) {
+		g_free(devc->wch_chunk);
+		devc->wch_chunk = NULL;
+		sr_err("Failed to set up reads on WCH's driver.");
+		g_free(devc->outbuf);
+		devc->outbuf = NULL;
+		if (devc->stl) {
+			soft_trigger_logic_free(devc->stl);
+			devc->stl = NULL;
+		}
+		return SR_ERR;
+	}
+	devc->wch_sdi = sdi;
+	devc->wch_last_data_ms = g_get_monotonic_time() / 1000;
+	sr_session_source_add(sdi->session, -1, 0, WCH_POLL_PERIOD_MS,
+			receive_wch_data, (void *)sdi);
+
+	for (i = 0; i < WCH_NUM_READS; i++) {
+		result = dla_wch_stream_submit(devc->wch_stream, i);
+		if (result != DLA_WCH_OK) {
+			sr_err("Failed to queue a read on WCH's driver: %s.",
+				dla_wch_result_name(result));
+			devc->acq_failed = TRUE;
+			fnirsi_dla_abort_acquisition(sdi);
+			fnirsi_dla_drain_pending_transfers(devc);
+			return SR_ERR;
+		}
+	}
+
+	/* As on libusb: start the device only now that every read is
+	 * queued. */
+	std_session_send_df_header(sdi);
+	if ((ret = send_parameter_setting(sdi)) != SR_OK ||
+			(ret = send_simple_trigger(sdi, channel_mask(devc))) != SR_OK) {
+		devc->acq_failed = TRUE;
+		fnirsi_dla_abort_acquisition(sdi);
+		fnirsi_dla_drain_pending_transfers(devc);
+		return ret;
+	}
+
+	return SR_OK;
 }
 
 SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
@@ -1184,7 +1410,13 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 
 	devc->ctx = drvc->sr_ctx;
 	devc->sent_samples = 0;
+	if (devc->wch_replug_needed) {
+		sr_err("The last capture failed: unplug and replug the device, "
+			"WCH's driver cannot recover it otherwise.");
+		return SR_ERR;
+	}
 	devc->acq_aborted = FALSE;
+	devc->acq_failed = FALSE;
 	devc->limit_reached = FALSE;
 	devc->stop_sent = FALSE;
 	devc->stop_pending = FALSE;
@@ -1234,9 +1466,9 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 	/* Drain only here, while the device is stopped and before any
 	 * transfer is queued: a drain after the start commands would eat the
 	 * capture's own first bytes. */
-	if ((ret = send_stop(usb->devhdl)) != SR_OK)
+	if ((ret = send_stop(sdi)) != SR_OK)
 		goto err_free_stl;
-	if ((ret = drain_sample_endpoint(usb->devhdl)) != SR_OK)
+	if ((ret = drain_sample_endpoint(sdi)) != SR_OK)
 		goto err_free_stl;
 
 	/* Worst case expansion is (8 * unitsize)-fold: num_active == 1, each
@@ -1250,6 +1482,9 @@ SR_PRIV int fnirsi_dla_start_acquisition(const struct sr_dev_inst *sdi)
 		ret = SR_ERR_MALLOC;
 		goto err_free_stl;
 	}
+
+	if (devc->wch)
+		return start_wch_stream(sdi);
 
 	devc->num_transfers = NUM_SIMUL_TRANSFERS;
 	devc->transfers = g_try_malloc0(sizeof(*devc->transfers) * devc->num_transfers);

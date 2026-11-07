@@ -35,6 +35,9 @@
 #include <libsigrok/libsigrok.h>
 #include "libsigrok-internal.h"
 
+struct dla_wch;
+struct dla_wch_stream;
+
 #define LOG_PREFIX "fnirsi-dla"
 
 /* USB VID/PID for the DLA-16 Plus. */
@@ -90,6 +93,14 @@
 
 #define NUM_SIMUL_TRANSFERS	8
 #define MAX_EMPTY_TRANSFERS	(NUM_SIMUL_TRANSFERS * 2)
+/* On WCH's driver: the session polls every WCH_POLL_PERIOD_MS and waits at
+ * most WCH_POLL_WAIT_MS for the oldest read; nothing read for
+ * WCH_SILENCE_MS ends the acquisition, as MAX_EMPTY_TRANSFERS timed-out
+ * libusb transfers do. */
+#define WCH_NUM_READS		16
+#define WCH_POLL_PERIOD_MS	1
+#define WCH_POLL_WAIT_MS	10
+#define WCH_SILENCE_MS		(USB_TIMEOUT_MS * MAX_EMPTY_TRANSFERS / NUM_SIMUL_TRANSFERS)
 /* Ceiling for the per-transfer USB buffer size. */
 #define TRANSFER_BUFSIZE	(1024 * 1024)
 /* Floor for the per-transfer USB buffer size. */
@@ -239,6 +250,18 @@ struct dev_context {
 	unsigned int num_transfers;
 	struct libusb_transfer **transfers;
 	struct sr_context *ctx;
+
+	/* Windows only: the device is on WCH's driver instead of WinUSB, and
+	 * the reads queued on it while an acquisition runs (see wch.h). */
+	struct dla_wch *wch;
+	struct dla_wch_stream *wch_stream;
+	uint8_t *wch_chunk;
+	const struct sr_dev_inst *wch_sdi;
+	int64_t wch_last_data_ms;
+	/* The acquisition ended on an error, not on STOP or its limit. */
+	gboolean acq_failed;
+	/* A capture on WCH's driver failed: only a replug recovers it. */
+	gboolean wch_replug_needed;
 };
 
 SR_PRIV extern const struct fnirsi_dla_rate fnirsi_dla_rates[];

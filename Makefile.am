@@ -374,7 +374,11 @@ if HW_FNIRSI_DLA
 src_libdrivers_la_SOURCES += \
 	src/hardware/fnirsi-dla/protocol.h \
 	src/hardware/fnirsi-dla/protocol.c \
-	src/hardware/fnirsi-dla/api.c
+	src/hardware/fnirsi-dla/api.c \
+	src/hardware/fnirsi-dla/wch.h \
+	src/hardware/fnirsi-dla/wch.c \
+	src/hardware/fnirsi-dla/wch_codec.h \
+	src/hardware/fnirsi-dla/wch_codec.c
 endif
 if HW_FTDI_LA
 src_libdrivers_la_SOURCES += \

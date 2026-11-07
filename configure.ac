@@ -194,7 +194,10 @@ AC_CHECK_HEADERS([sys/ioctl.h], [SR_APPEND([sr_deps_avail], [sys_ioctl_h])])
 AC_CHECK_HEADERS([sys/timerfd.h], [SR_APPEND([sr_deps_avail], [sys_timerfd_h])])
 
 # We need to link against the Winsock2 library for SCPI over TCP.
-AS_CASE([$host_os], [mingw*], [SR_PREPEND([SR_EXTRA_LIBS], [-lws2_32])])
+AS_CASE([$host_os], [mingw*], [
+	SR_PREPEND([SR_EXTRA_LIBS], [-lws2_32])
+	SR_PREPEND([SR_EXTRA_LIBS], [-lcfgmgr32])
+])
 
 # libm (the standard math library) is always needed.
 SR_SEARCH_LIBS([SR_EXTRA_LIBS], [pow], [m])

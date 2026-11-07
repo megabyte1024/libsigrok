@@ -20,6 +20,7 @@
 #include <config.h>
 #include <math.h>
 #include "protocol.h"
+#include "wch.h"
 
 #define DEFAULT_SAMPLERATE	SR_MHZ(10)
 #define DEFAULT_THRESHOLD	1.50 /* volts */
@@ -201,6 +202,45 @@ static GSList *fnirsi_dla_scan(struct sr_dev_driver *di, GSList *options)
 	return std_scan_complete(di, devices);
 }
 
+/*
+ * On Windows the device may be bound to WCH's own driver, which libusb
+ * cannot open: then it is opened there. SR_ERR_NA: it is not on WCH's
+ * driver, open it with libusb.
+ */
+static int open_on_wch(struct sr_dev_inst *sdi, libusb_device *dev,
+		const struct libusb_device_descriptor *des)
+{
+	struct dev_context *devc;
+	enum dla_wch_result result;
+	uint8_t ports[DLA_WCH_MAX_PORT_DEPTH];
+	char *path;
+	int num_ports, ret;
+
+	devc = sdi->priv;
+	num_ports = libusb_get_port_numbers(dev, ports, sizeof(ports));
+	path = num_ports > 0 ? dla_wch_find_path(des->idVendor,
+			des->idProduct, ports, num_ports) : NULL;
+	if (!path)
+		return SR_ERR_NA;
+
+	result = dla_wch_open(path, &devc->wch);
+	g_free(path);
+	if (result != DLA_WCH_OK) {
+		sr_err("Failed to open device on WCH's driver: %s.",
+			dla_wch_result_name(result));
+		return SR_ERR;
+	}
+	sr_info("Device is on WCH's driver (not WinUSB).");
+	devc->wch_replug_needed = FALSE;
+
+	if ((ret = fnirsi_dla_connect(sdi)) != SR_OK) {
+		fnirsi_dla_send_exit(sdi);
+		dla_wch_close(devc->wch);
+		devc->wch = NULL;
+	}
+	return ret;
+}
+
 static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 {
 	struct drv_context *drvc;
@@ -241,6 +281,9 @@ static int fnirsi_dla_dev_open(struct sr_dev_inst *sdi)
 			break;
 		}
 
+		if ((ret = open_on_wch(sdi, devlist[i], &des)) != SR_ERR_NA)
+			break;
+
 		if ((ret = libusb_open(devlist[i], &usb->devhdl)) < 0) {
 			sr_err("Failed to open device: %s.", libusb_error_name(ret));
 			ret = SR_ERR;
@@ -274,16 +317,22 @@ static int fnirsi_dla_dev_close(struct sr_dev_inst *sdi)
 	struct sr_usb_dev_inst *usb;
 
 	usb = sdi->conn;
-	if (!usb->devhdl)
+	devc = sdi->priv;
+	if (!usb->devhdl && !devc->wch)
 		return SR_OK;
 
-	devc = sdi->priv;
-	if (devc->transfers) {
+	if (devc->transfers || devc->wch_stream) {
 		fnirsi_dla_abort_acquisition(sdi);
 		fnirsi_dla_drain_pending_transfers(devc);
 	}
 	fnirsi_dla_send_pending_stop(sdi);
 	fnirsi_dla_send_exit(sdi);
+
+	if (devc->wch) {
+		dla_wch_close(devc->wch);
+		devc->wch = NULL;
+		return SR_OK;
+	}
 
 	libusb_release_interface(usb->devhdl, USB_INTERFACE);
 	libusb_close(usb->devhdl);
